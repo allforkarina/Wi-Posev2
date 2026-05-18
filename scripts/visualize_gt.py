@@ -57,6 +57,7 @@ def main():
     parser.add_argument("--gt", default="data/gt_merged/ground_truth.npy")
     parser.add_argument("--frame", type=int, default=0)
     parser.add_argument("--output", default=None, help="Save to file instead of showing")
+    parser.add_argument("--no-bones", action="store_true", default=False, help="Hide bone connections")
     args = parser.parse_args()
 
     gt_path = Path(args.gt)
@@ -96,16 +97,17 @@ def main():
             zorder=10,
         )
 
-    for start, end in OPENPOSE_BONE_EDGES:
-        if valid_mask[start] and valid_mask[end]:
-            ax.plot(
-                [kpts[start, 0], kpts[end, 0]],
-                [kpts[start, 1], kpts[end, 1]],
-                color="#ffffff",
-                linewidth=1.0,
-                alpha=0.35,
-                zorder=1,
-            )
+    if not args.no_bones:
+        for start, end in OPENPOSE_BONE_EDGES:
+            if valid_mask[start] and valid_mask[end]:
+                ax.plot(
+                    [kpts[start, 0], kpts[end, 0]],
+                    [kpts[start, 1], kpts[end, 1]],
+                    color="#ffffff",
+                    linewidth=1.0,
+                    alpha=0.35,
+                    zorder=1,
+                )
 
     margin = 0.15
     valid_kpts = kpts[valid_mask]

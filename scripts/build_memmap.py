@@ -126,15 +126,20 @@ def normalize_kpts_to_pose_range(
         kpts = kpts * span + pose_min
     invalid = ~np.isfinite(kpts).all(axis=-1) | np.all(np.isclose(kpts, 0.0), axis=-1)
     kpts[invalid] = 0.0
+    kpts = np.clip(kpts, pose_min, pose_max)
     return kpts.astype(np.float32)
 
 
-def iter_trials(src_root: Path) -> list[Path]:
+def iter_trials(src_root: Path, require_rgb: bool = True) -> list[Path]:
     trials: list[Path] = []
     for action_dir in sorted(p for p in src_root.iterdir() if p.is_dir() and p.name.startswith("A")):
         for subj_dir in sorted(p for p in action_dir.iterdir() if p.is_dir() and p.name.startswith("S")):
-            if (subj_dir / "wifi-csi").is_dir() and (subj_dir / "rgb").is_dir():
+            has_wifi = (subj_dir / "wifi-csi").is_dir()
+            has_rgb = (subj_dir / "rgb").is_dir()
+            if has_wifi and (require_rgb or (not require_rgb)):
                 trials.append(subj_dir)
+            elif has_wifi and require_rgb and not has_rgb:
+                pass
     return trials
 
 
@@ -251,7 +256,7 @@ def main():
     train_set = set(args.train_subjects)
     gt_dir = Path(args.gt_dir) if args.gt_dir else None
 
-    trials = iter_trials(src_root)
+    trials = iter_trials(src_root, require_rgb=(gt_dir is None))
     print(f"Found {len(trials)} trials")
     if gt_dir:
         print(f"Using GT dir: {gt_dir}")

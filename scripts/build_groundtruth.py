@@ -62,6 +62,7 @@ def normalize_kpts_to_pose_range(
         kpts = kpts * span + pose_min
     invalid = ~np.isfinite(kpts).all(axis=-1) | np.all(np.isclose(kpts, 0.0), axis=-1)
     kpts[invalid] = 0.0
+    kpts = np.clip(kpts, pose_min, pose_max)
     return kpts.astype(np.float32)
 
 
