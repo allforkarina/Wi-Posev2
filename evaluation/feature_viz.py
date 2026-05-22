@@ -145,11 +145,9 @@ def _collect_action_env_samples(
                     "frame_idx": int(batch["frame_idx"][i]),
                 }
 
-            all_saturated = all(
-                len(e) >= num_per_action for e in action_env.values()
-            )
-            if all_saturated:
-                break
+            # Do not break early — iterate the full test set to collect
+            # samples from all action types.  Skips duplicate envs per action
+            # so the loop naturally terminates after all actions are covered.
 
     return dict(action_env)
 
