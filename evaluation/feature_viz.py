@@ -951,6 +951,91 @@ def _build_overview(
 
 
 # ---------------------------------------------------------------------------
+# Per-action composite figures
+# ---------------------------------------------------------------------------
+
+
+def _build_action_composites(
+    action_env: dict[str, dict[str, dict[str, Any]]],
+    viz_dir: Path,
+    model: WiFlowModel,
+    all_hooks: list[str],
+    device: torch.device,
+) -> None:
+    """For each action, generate a 2×2 composite: joint scatter + attention.
+
+    Each action gets one composite page showing fig0 and fig3 from up to
+    2 representative environment samples for side-by-side comparison.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        print("    [INFO] PIL not installed — skipping action composites")
+        return
+
+    actions_dir = viz_dir / "_actions"
+    actions_dir.mkdir(parents=True, exist_ok=True)
+
+    for action, env_dict in sorted(action_env.items()):
+        print(f"  Building action composite: {action}")
+        envs = sorted(env_dict.keys())
+        n_envs = len(envs)
+
+        # Take up to 2 environments for side-by-side comparison
+        envs_to_show = envs[:2]
+
+        # Ensure figures exist for these samples via per-sample loop results
+        # Each sample should already have fig0/fig3 generated.  If not,
+        # generate them now.
+        sample_paths: list[Path] = []
+        for env in envs_to_show:
+            s_dir = viz_dir / f"{action}_{env}_s0"
+            s_dir.mkdir(parents=True, exist_ok=True)
+            sample_paths.append(s_dir)
+
+            sample = env_dict[env]
+            if not (s_dir / "fig0_joint_scatter.png").exists() or not (s_dir / "fig3_axial_attention.png").exists():
+                with wiflow_hooks(model, all_hooks) as ctx:
+                    with torch.no_grad():
+                        _ = model(sample["model_input"].to(device))
+                if not (s_dir / "fig0_joint_scatter.png").exists():
+                    _fig0_joint_scatter(sample, s_dir)
+                if not (s_dir / "fig3_axial_attention.png").exists():
+                    _fig3_axial_attention(sample, ctx, s_dir)
+
+        # Build the composite: rows = figure types, cols = environment samples
+        n_cols = len(envs_to_show)
+        n_rows = 2  # fig0 + fig3
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(9 * n_cols, 8 * n_rows))
+        if n_cols == 1:
+            axes = axes.reshape(-1, 1)
+
+        fig_types = [
+            ("fig0_joint_scatter", "Joint Scatter"),
+            ("fig3_axial_attention", "Axial Attention"),
+        ]
+        for r, (fname, f_label) in enumerate(fig_types):
+            for c, sp in enumerate(sample_paths):
+                ax = axes[r, c]
+                img_path = sp / f"{fname}.png"
+                if img_path.exists():
+                    img = Image.open(img_path)
+                    ax.imshow(img)
+                ax.set_title(
+                    f"{envs_to_show[c]} — {f_label}",
+                    fontsize=10, fontweight="bold",
+                )
+                ax.axis("off")
+
+        fig.suptitle(
+            f"Action: {action}  ({n_envs} environments sampled)",
+            fontsize=14, fontweight="bold",
+        )
+        _apply_spacing(fig)
+        _save_fig(fig, actions_dir / f"composite_{action}")
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -1075,6 +1160,16 @@ def run_feature_visualization(
             if decoder_type == "heatmap_msfn":
                 _fig5a_pcm_radar(sample, ctx, sample_dir)
                 _fig5b_paf_direction_consistency(sample, ctx, sample_dir)
+
+    # --- Per-action composites ---
+    print("  Building per-action composite figures...")
+    _build_action_composites(
+        action_env=action_env,
+        viz_dir=viz_dir,
+        model=model,
+        all_hooks=all_hooks,
+        device=device,
+    )
 
     # --- Global figure 6 ---
     # Create a fresh loader for the one-pass correlation collection
