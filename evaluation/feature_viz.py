@@ -173,6 +173,84 @@ def _flatten_samples(
 
 
 # ---------------------------------------------------------------------------
+# Figure 0: Joint scatter visualization (GT vs predicted keypoints)
+# ---------------------------------------------------------------------------
+
+
+def _fig0_joint_scatter(
+    sample: dict[str, Any],
+    sample_dir: Path,
+) -> None:
+    """Draw GT and predicted keypoints as colored scatter points (no skeleton).
+
+    Uses anatomical group colors for both GT (filled circles) and prediction
+    (hollow diamonds).  Thin gray error vectors connect each GT→pred pair.
+    """
+    target = sample["target"].cpu().numpy().squeeze(0)  # [18, 2]
+    prediction = sample["prediction"]                     # [18, 2]
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+
+    # Determine axis limits with 10% padding
+    all_points = np.concatenate([target, prediction], axis=0)
+    x_min, x_max = all_points[:, 0].min(), all_points[:, 0].max()
+    y_min, y_max = all_points[:, 1].min(), all_points[:, 1].max()
+    x_pad = max((x_max - x_min) * 0.1, 0.02)
+    y_pad = max((y_max - y_min) * 0.1, 0.02)
+
+    # --- Error vectors: faint gray dashed lines ---
+    for j in range(18):
+        ax.plot(
+            [target[j, 0], prediction[j, 0]],
+            [target[j, 1], prediction[j, 1]],
+            color="gray", linewidth=0.5, linestyle="--", alpha=0.5,
+            zorder=1,
+        )
+
+    # --- GT: filled circles ---
+    for group_name, group_color in _ANATOMY_COLORS.items():
+        indices = _ANATOMY_GROUPS[group_name]
+        ax.scatter(
+            target[indices, 0], target[indices, 1],
+            c=group_color, marker="o", s=80, edgecolors="black",
+            linewidths=0.5, zorder=3,
+        )
+
+    # --- Prediction: hollow diamonds ---
+    for group_name, group_color in _ANATOMY_COLORS.items():
+        indices = _ANATOMY_GROUPS[group_name]
+        ax.scatter(
+            prediction[indices, 0], prediction[indices, 1],
+            facecolors="none", marker="D", s=80, edgecolors=group_color,
+            linewidths=1.2, zorder=2,
+        )
+
+    # --- Legend (2 entries: GT vs Pred) ---
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="gray",
+               markeredgecolor="black", markersize=8, label="GT"),
+        Line2D([0], [0], marker="D", color="w", markerfacecolor="white",
+               markeredgecolor="gray", markersize=8, label="Prediction"),
+    ]
+    ax.legend(handles=legend_elements, loc="upper right", fontsize=9)
+
+    ax.set_xlim(x_min - x_pad, x_max + x_pad)
+    ax.set_ylim(y_max + y_pad, y_min - y_pad)  # invert for natural pose
+    ax.set_aspect("equal")
+    ax.set_xlabel("Normalized X")
+    ax.set_ylabel("Normalized Y")
+    ax.set_title(
+        f"Joint Prediction vs GT — {sample['action']} / {sample['environment']}",
+        fontsize=12, fontweight="bold",
+    )
+    ax.grid(True, alpha=0.3)
+
+    _apply_spacing(fig)
+    _save_fig(fig, sample_dir / "fig0_joint_scatter")
+
+
+# ---------------------------------------------------------------------------
 # Figure 1: Antenna Channel Response Analysis
 # ---------------------------------------------------------------------------
 
@@ -804,7 +882,7 @@ def _build_overview(
     output_dir: Path,
     decoder_type: str,
 ) -> None:
-    """Build a 2×3 overview thumbnail composite of all 6 figures."""
+    """Build a 3×3 overview thumbnail composite of all figures."""
     try:
         from PIL import Image
     except ImportError:
@@ -812,6 +890,7 @@ def _build_overview(
         return
 
     fig_names = [
+        "fig0_joint_scatter",
         "fig1_antenna_channel",
         "fig2_downsampling_trajectory",
         "fig3_axial_attention",
@@ -848,7 +927,7 @@ def _build_overview(
     if len(valid) < 3:
         return
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig, axes = plt.subplots(3, 3, figsize=(18, 18))
     axes = axes.flatten()
 
     for idx, (ax, img_path) in enumerate(zip(axes, img_paths)):
@@ -864,7 +943,7 @@ def _build_overview(
         ax.axis("off")
 
     # hide unused axes
-    for idx in range(len(img_paths), 6):
+    for idx in range(len(img_paths), 9):
         axes[idx].axis("off")
 
     fig.suptitle("Feature Visualization Overview", fontsize=14, fontweight="bold")
@@ -984,6 +1063,9 @@ def run_feature_visualization(
 
             # Fig 3: Axial Attention
             _fig3_axial_attention(sample, ctx, sample_dir)
+
+            # Fig 0: Joint Scatter (GT vs prediction, no skeleton)
+            _fig0_joint_scatter(sample, sample_dir)
 
             # Fig 4: Joint Query Trajectory (joint / hierarchical only)
             if decoder_type in ("joint", "hierarchical"):
