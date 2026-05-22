@@ -81,10 +81,17 @@ def _apply_spacing(fig: plt.Figure) -> None:
     fig.subplots_adjust(**_GLOBAL_SPACING)
 
 
+_OUTPUT_FORMAT = "both"
+_FIGURE_WIDTH: float | None = None
+_FIGURE_HEIGHT: float | None = None
+
+
 def _save_fig(fig: plt.Figure, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(path.with_suffix(".pdf")), dpi=300)
-    fig.savefig(str(path.with_suffix(".png")), dpi=300)
+    if _OUTPUT_FORMAT in ("pdf", "both"):
+        fig.savefig(str(path.with_suffix(".pdf")), dpi=300)
+    if _OUTPUT_FORMAT in ("png", "both"):
+        fig.savefig(str(path.with_suffix(".png")), dpi=300)
     plt.close(fig)
 
 
@@ -879,6 +886,9 @@ def run_feature_visualization(
     num_action_samples: int = 3,
     batch_size: int = 64,
     num_workers: int = 0,
+    output_format: str = "both",
+    figure_width: float | None = None,
+    figure_height: float | None = None,
 ) -> None:
     """Orchestrate all 6 feature visualization figures.
 
@@ -902,7 +912,18 @@ def run_feature_visualization(
         Batch size for the fresh correlation loader.
     num_workers : int
         Number of data loader workers.
+    output_format : str
+        ``"png"``, ``"pdf"``, or ``"both"`` (default).
+    figure_width : float | None
+        Override default figure width in inches.
+    figure_height : float | None
+        Override default figure height in inches.
     """
+    global _OUTPUT_FORMAT, _FIGURE_WIDTH, _FIGURE_HEIGHT
+    _OUTPUT_FORMAT = output_format
+    _FIGURE_WIDTH = figure_width
+    _FIGURE_HEIGHT = figure_height
+
     viz_dir = output_dir / "feature_viz"
     viz_dir.mkdir(parents=True, exist_ok=True)
 

@@ -251,6 +251,18 @@ def parse_args() -> argparse.Namespace:
         "--num-action-samples", type=int, default=3,
         help="Samples per action type for feature visualization (default: 3).",
     )
+    parser.add_argument(
+        "--output-format", choices=["png", "pdf", "both"], default="both",
+        help="Output image format for feature visualization (default: both).",
+    )
+    parser.add_argument(
+        "--figure-width", type=float, default=None,
+        help="Override default figure width in inches.",
+    )
+    parser.add_argument(
+        "--figure-height", type=float, default=None,
+        help="Override default figure height in inches.",
+    )
     return parser.parse_args()
 
 
@@ -294,6 +306,9 @@ def main() -> None:
             num_action_samples=args.num_action_samples,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
+            output_format=args.output_format,
+            figure_width=args.figure_width,
+            figure_height=args.figure_height,
         )
         print("Feature visualization complete.")
 
