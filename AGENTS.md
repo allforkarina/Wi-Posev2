@@ -7,8 +7,15 @@
 - `pose_targets.py`: Torch utilities for online OpenPose18 PCM/PAF target synthesis from normalized coordinates and argmax PCM decoding back to normalized keypoints.
 - `models/`: PyTorch model code, including the full WiFlow model, CSI spatial encoder with symmetric spatio-temporal downsampling, axial attention encoder, spatial-temporal fuser (legacy), multi-layer joint cross-attention decoder, hierarchical joint decoder ablation, MultiFormer-style MSFN heatmap decoder with PAPM feedback, legacy temporal encoder, legacy attention pooler, legacy skeleton-aware decoder, and shared OpenPose18 skeleton topology. The active single-frame model path is CSI amplitude input -> spatial encoder with antenna mixing, feature stem, and symmetric time-frequency residual blocks -> axial encoder -> the configured decoder.
 - `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and CSV logging.
-- `eval.py`: Root-level evaluation entrypoint for loading checkpoints, computing test metrics, and saving CSI/skeleton visualizations.
-- `scripts/build_memmap.py`: Command-line wrapper that builds an NPY memmap dataset from the raw MM-Fi directory structure.
+- `eval.py`: Root-level evaluation entrypoint for loading checkpoints, computing test metrics, and optionally generating research-grade feature visualizations via `--feature-viz`.
+- `evaluation/`: Evaluation pipeline package.
+  - `evaluation/hooks.py`: Forward hook context manager (`WiFlowHookContext`, `wiflow_hooks`) for non-invasive intermediate feature extraction from WiFlow submodules.
+  - `evaluation/feature_viz.py`: Orchestrator and 6 figure-drawing functions for research-grade feature visualization (antenna channel response, resblock PCA trajectory, axial attention maps, joint query t-SNE, PCM/PAF heatmap quality, feature-pose correlation).
+- `scripts/`: Preprocessing and diagnostic utilities.
+  - `scripts/build_memmap.py`: Command-line wrapper that builds an NPY memmap dataset from the raw MM-Fi directory structure.
+  - `scripts/build_groundtruth.py`: Builds ground-truth keypoint statistics and visualizations.
+  - `scripts/visualize_gt.py`: Visualizes ground-truth pose annotations overlaid on corresponding video frames.
+  - `scripts/diagnose_loss.py`: Standalone loss diagnostic tool for analyzing PCM prediction quality per joint.
 - `tests/`: `pytest` unit tests. Mirror module names such as `tests/test_dataloader.py`, `tests/test_wiflow_model.py`, or `tests/test_wiflow_decoder.py`.
 - `.gitignore`: Excludes Python caches, local environments, generated datasets, checkpoints, and editor files from Git.
 

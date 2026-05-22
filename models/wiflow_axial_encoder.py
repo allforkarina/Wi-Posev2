@@ -75,7 +75,7 @@ class WiFlowAxialEncoder(nn.Module):
             spatial_input,
             spatial_input,
             spatial_input,
-            need_weights=False,
+            need_weights=True,
         )
         spatial_output = self.spatial_norm(spatial_output + spatial_input)
         return self._restore_spatial_attention_output(spatial_output, batch_size, spatial_tokens, temporal)
@@ -88,7 +88,7 @@ class WiFlowAxialEncoder(nn.Module):
             temporal_input,
             temporal_input,
             temporal_input,
-            need_weights=False,
+            need_weights=True,
         )
         temporal_output = self.temporal_norm(temporal_output + temporal_input)
         return self._restore_temporal_attention_output(temporal_output, batch_size, spatial_tokens, temporal)
