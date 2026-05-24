@@ -509,17 +509,19 @@ def run_da_epoch(
             "target_mpjpe": metrics_t["mpjpe"],
             "target_pck_0_2": metrics_t["pck_0_2"],
         }
-        ical_items = {"ical": loss_ical.detach()}
-
-        for name, value in {**source_metric_items, **target_metric_items, **ical_items}.items():
+        for name, value in {**source_metric_items, **target_metric_items}.items():
             weight = bs_s if name.startswith("source") else bs_t
             totals[name] = totals.get(name, 0.0) + float(value.detach().cpu()) * weight
+        totals["ical"] = totals.get("ical", 0.0) + float(loss_ical.detach().cpu())
 
     # Average
     averaged: Dict[str, float] = {}
     for name, total in totals.items():
-        count = source_sample_count if name.startswith("source") else target_sample_count
-        averaged[name] = total / max(count, 1)
+        if name == "ical":
+            averaged[name] = total / max(step_count, 1)
+        else:
+            count = source_sample_count if name.startswith("source") else target_sample_count
+            averaged[name] = total / max(count, 1)
     return averaged
 ```
 
