@@ -18,6 +18,7 @@
 | Modify | `models/__init__.py` | Add `CECEModule` to exports |
 | Modify | `dataloader.py` | Add `create_da_data_loaders` factory |
 | Modify | `train.py` | `TrainConfig` DA fields, `compute_ical_loss`, `run_da_epoch`, `run_val_epoch`, `run_training` rewrite, CLI |
+| Modify | `AGENTS.md` | Add DA training command examples |
 
 No other files changed.
 
