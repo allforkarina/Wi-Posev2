@@ -44,7 +44,12 @@ class TrainConfig:
     num_workers: int = 4
     device: str = "cuda"
     seed: int = 42
-    subset_size: int | None = None
+    # DA fields
+    source_envs: tuple[str, ...] = ("lab",)
+    target_envs: tuple[str, ...] = ("corridor",)
+    alpha: float = 0.1
+    ical_warmup_epochs: int = 5
+    cece_enabled: bool = True
 
 
 def prepare_model_input(
@@ -202,39 +207,94 @@ def average_meter_totals(totals: Dict[str, float], count: int) -> Dict[str, floa
     return {name: value / max(count, 1) for name, value in totals.items()}
 
 
-def run_epoch(
+def run_da_epoch(
     model: nn.Module,
-    loader: Iterable[Mapping[str, torch.Tensor]],
+    cece: CECEModule | None,
+    source_loader: DataLoader,
+    target_loader: DataLoader,
     criterion_config: TrainConfig,
     device: torch.device,
+    epoch: int,
     optimizer: AdamW | None = None,
     scheduler: LRScheduler | None = None,
 ) -> Dict[str, float]:
+    """Run one epoch of dual-domain training.
+
+    Splits WiFlowModel's forward into spatial → CECE → decoder to
+    compute per-domain supervised losses and the ICAL cross-domain loss.
+
+    Source loader is iterated in a cycle; when exhausted the iterator
+    is rebuilt to trigger a fresh shuffle (no fixed pairings across epochs).
+    """
     is_training = optimizer is not None
     model.train(is_training)
-    totals: Dict[str, float] = {}
-    sample_count = 0
 
-    for batch in loader:
-        model_input, target = prepare_model_input(batch, device)
+    # ICAL warmup: linearly ramp alpha from 0 to config.alpha
+    actual_alpha = criterion_config.alpha * min(
+        1.0, epoch / max(criterion_config.ical_warmup_epochs, 1)
+    )
+
+    totals: Dict[str, float] = {}
+    source_sample_count = 0
+    target_sample_count = 0
+    step_count = 0
+    source_iter = iter(source_loader)
+
+    for batch_t in target_loader:
+        # --- source batch (cycle with re-shuffle) ---
+        try:
+            batch_s = next(source_iter)
+        except StopIteration:
+            source_iter = iter(source_loader)
+            batch_s = next(source_iter)
+
+        x_s, kp_s_gt = prepare_model_input(batch_s, device)
+        x_t, kp_t_gt = prepare_model_input(batch_t, device)
+
+        bs_s = x_s.shape[0]
+        bs_t = x_t.shape[0]
 
         with torch.set_grad_enabled(is_training):
-            prediction = model(model_input)
-            losses = compute_losses(
-                prediction,
-                target,
+            # Forward: spatial → axial
+            feat_s = model.axial_encoder(model.spatial_encoder(x_s))
+            feat_t = model.axial_encoder(model.spatial_encoder(x_t))
+
+            # CECE channel reweighting
+            if criterion_config.cece_enabled and cece is not None:
+                feat_s_ce, feat_t_ce = cece(feat_s, feat_t)
+            else:
+                feat_s_ce, feat_t_ce = feat_s, feat_t
+
+            # Decode
+            y_s = model.decode_features(feat_s_ce)
+            y_t = model.decode_features(feat_t_ce)
+
+            # Supervised losses
+            losses_s = compute_losses(
+                y_s,
+                kp_s_gt,
                 bone_loss_weight=criterion_config.bone_loss_weight,
-                heatmap_size=criterion_config.heatmap_size,
-                heatmap_sigma=criterion_config.heatmap_sigma,
-                paf_width=criterion_config.paf_width,
-                paf_loss_weight=criterion_config.paf_loss_weight,
             )
-            keypoint_prediction = extract_prediction_keypoints(prediction)
-            metrics = compute_metrics(keypoint_prediction.detach(), target)
+            losses_t = compute_losses(
+                y_t,
+                kp_t_gt,
+                bone_loss_weight=criterion_config.bone_loss_weight,
+            )
+
+            # ICAL loss
+            f_s_pooled = feat_s_ce.mean(dim=[2, 3])           # GAP → [B, 256]
+            f_t_pooled = feat_t_ce.mean(dim=[2, 3])           # GAP → [B, 256]
+            y_s_keypoints = extract_prediction_keypoints(y_s)
+            y_t_keypoints = extract_prediction_keypoints(y_t)
+            loss_ical = compute_ical_loss(
+                f_s_pooled, f_t_pooled, kp_s_gt, y_t_keypoints,
+            )
+
+            loss = (losses_s["loss"] + losses_t["loss"]) / 2.0 + actual_alpha * loss_ical
 
             if is_training:
                 optimizer.zero_grad(set_to_none=True)
-                losses["loss"].backward()
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(
                     model.parameters(),
                     max_norm=criterion_config.grad_clip_norm,
@@ -243,10 +303,82 @@ def run_epoch(
                 if scheduler is not None:
                     scheduler.step()
 
-        batch_size = target.shape[0]
-        sample_count += batch_size
-        for name, value in {**losses, **metrics}.items():
-            totals[name] = totals.get(name, 0.0) + float(value.detach().cpu()) * batch_size
+        # Metrics
+        kp_s_pred = extract_prediction_keypoints(y_s).detach()
+        kp_t_pred = extract_prediction_keypoints(y_t).detach()
+        metrics_s = compute_metrics(kp_s_pred, kp_s_gt)
+        metrics_t = compute_metrics(kp_t_pred, kp_t_gt)
+
+        source_sample_count += bs_s
+        target_sample_count += bs_t
+        step_count += 1
+
+        source_metric_items = {
+            "source_loss": losses_s["loss"],
+            "source_coord_loss": losses_s["coord_loss"],
+            "source_bone_loss": losses_s["bone_loss"],
+            "source_mpjpe": metrics_s["mpjpe"],
+            "source_pck_0_2": metrics_s["pck_0_2"],
+        }
+        target_metric_items = {
+            "target_loss": losses_t["loss"],
+            "target_coord_loss": losses_t["coord_loss"],
+            "target_bone_loss": losses_t["bone_loss"],
+            "target_mpjpe": metrics_t["mpjpe"],
+            "target_pck_0_2": metrics_t["pck_0_2"],
+        }
+
+        for name, value in {**source_metric_items, **target_metric_items}.items():
+            weight = bs_s if name.startswith("source") else bs_t
+            totals[name] = totals.get(name, 0.0) + float(value.detach().cpu()) * weight
+        totals["ical"] = totals.get("ical", 0.0) + float(loss_ical.detach().cpu())
+
+    # Average
+    averaged: Dict[str, float] = {}
+    for name, total in totals.items():
+        if name == "ical":
+            averaged[name] = total / max(step_count, 1)
+        else:
+            count = source_sample_count if name.startswith("source") else target_sample_count
+            averaged[name] = total / max(count, 1)
+    return averaged
+
+
+def run_val_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion_config: TrainConfig,
+    device: torch.device,
+) -> Dict[str, float]:
+    """Run validation on the target domain only.
+
+    Uses ``model.forward()`` directly — no CECE or ICAL applied.
+    Note: training feeds CECE-reweighted features to the decoder, but
+    validation feeds raw axial features.  This is intentional — at
+    inference time no source-domain batch is available to compute CECE
+    weights.  Val metrics may be slightly conservative because of this
+    distribution gap.
+    """
+    model.eval()
+    totals: Dict[str, float] = {}
+    sample_count = 0
+
+    with torch.no_grad():
+        for batch in loader:
+            model_input, target = prepare_model_input(batch, device)
+            prediction = model(model_input)
+            losses = compute_losses(
+                prediction,
+                target,
+                bone_loss_weight=criterion_config.bone_loss_weight,
+            )
+            keypoint_prediction = extract_prediction_keypoints(prediction)
+            metrics = compute_metrics(keypoint_prediction, target)
+
+            bs = target.shape[0]
+            sample_count += bs
+            for name, value in {**losses, **metrics}.items():
+                totals[name] = totals.get(name, 0.0) + float(value.detach().cpu()) * bs
 
     return average_meter_totals(totals, sample_count)
 
@@ -284,18 +416,6 @@ def append_csv_row(path: Path, row: Mapping[str, float | int | str]) -> None:
         writer.writerow(row)
 
 
-def maybe_subset_loader(loader: DataLoader, subset_size: int | None) -> DataLoader:
-    if subset_size is None:
-        return loader
-    subset_indices = list(range(min(subset_size, len(loader.dataset))))
-    return DataLoader(
-        Subset(loader.dataset, subset_indices),
-        batch_size=loader.batch_size,
-        shuffle=True,
-        num_workers=loader.num_workers,
-    )
-
-
 def select_device(device_name: str) -> torch.device:
     if device_name == "cuda" and not torch.cuda.is_available():
         return torch.device("cpu")
@@ -307,34 +427,42 @@ def run_training(config: TrainConfig) -> None:
     device = select_device(config.device)
     output_dir = Path(config.output_dir)
 
-    loaders = create_memmap_data_loaders(
+    loaders = create_da_data_loaders(
         data_dir=config.dataset_root,
+        source_envs=config.source_envs,
+        target_envs=config.target_envs,
         batch_size=config.batch_size,
         num_workers=config.num_workers,
         seed=config.seed,
     )
 
-    train_loader = maybe_subset_loader(loaders["train"], config.subset_size)
-    val_loader = maybe_subset_loader(loaders["val"], config.subset_size)
+    source_train_loader = loaders["source_train"]
+    target_train_loader = loaders["target_train"]
+    target_val_loader = loaders["target_val"]
+
     model = WiFlowModel(
         input_channels=3,
         axial_mode=config.axial_mode,
         decoder_type=config.decoder_type,
         heatmap_size=config.heatmap_size,
     ).to(device)
+
+    cece = CECEModule(num_channels=256).to(device) if config.cece_enabled else None
+
     optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     scheduler = OneCycleLR(
         optimizer,
         max_lr=config.max_lr,
         epochs=config.epochs,
-        steps_per_epoch=len(train_loader),
+        steps_per_epoch=len(target_train_loader),
         pct_start=0.3,
         anneal_strategy="cos",
         div_factor=config.max_lr / max(config.lr, 1e-8),
         final_div_factor=1000.0,
     )
 
-    first_batch = next(iter(train_loader))
+    # Sanity check
+    first_batch = next(iter(target_train_loader))
     model_input, target = prepare_model_input(first_batch, device)
     with torch.no_grad():
         output = model(model_input)
@@ -353,29 +481,41 @@ def run_training(config: TrainConfig) -> None:
     log_path = output_dir / "train_log.csv"
     for epoch in range(1, config.epochs + 1):
         start_time = time.perf_counter()
-        train_metrics = run_epoch(
-            model,
-            train_loader,
-            config,
-            device,
+        train_metrics = run_da_epoch(
+            model=model,
+            cece=cece,
+            source_loader=source_train_loader,
+            target_loader=target_train_loader,
+            criterion_config=config,
+            device=device,
+            epoch=epoch,
             optimizer=optimizer,
             scheduler=scheduler,
         )
-        val_metrics = run_epoch(model, val_loader, config, device)
+        val_metrics = run_val_epoch(model, target_val_loader, config, device)
         current_lr = optimizer.param_groups[0]["lr"]
         epoch_time = time.perf_counter() - start_time
+
+        actual_alpha = config.alpha * min(
+            1.0, epoch / max(config.ical_warmup_epochs, 1)
+        )
 
         row: Dict[str, float | int | str] = {
             "epoch": epoch,
             "axial_mode": config.axial_mode,
             "decoder_type": config.decoder_type,
-            "train_loss": train_metrics["loss"],
-            "train_coord_loss": train_metrics["coord_loss"],
-            "train_bone_loss": train_metrics["bone_loss"],
-            "train_pcm_loss": train_metrics["pcm_loss"],
-            "train_paf_loss": train_metrics["paf_loss"],
-            "train_mpjpe": train_metrics["mpjpe"],
-            "train_pck_0_2": train_metrics["pck_0_2"],
+            "train_source_loss": train_metrics["source_loss"],
+            "train_source_coord_loss": train_metrics["source_coord_loss"],
+            "train_source_bone_loss": train_metrics["source_bone_loss"],
+            "train_source_mpjpe": train_metrics["source_mpjpe"],
+            "train_source_pck_0_2": train_metrics["source_pck_0_2"],
+            "train_target_loss": train_metrics["target_loss"],
+            "train_target_coord_loss": train_metrics["target_coord_loss"],
+            "train_target_bone_loss": train_metrics["target_bone_loss"],
+            "train_target_mpjpe": train_metrics["target_mpjpe"],
+            "train_target_pck_0_2": train_metrics["target_pck_0_2"],
+            "train_ical": train_metrics["ical"],
+            "alpha": actual_alpha,
             "val_loss": val_metrics["loss"],
             "val_coord_loss": val_metrics["coord_loss"],
             "val_bone_loss": val_metrics["bone_loss"],
@@ -427,7 +567,9 @@ def run_training(config: TrainConfig) -> None:
 
         print(
             f"epoch={epoch:03d} "
-            f"train_loss={train_metrics['loss']:.6f} "
+            f"src_loss={train_metrics['source_loss']:.6f} "
+            f"tgt_loss={train_metrics['target_loss']:.6f} "
+            f"ical={train_metrics['ical']:.6f} "
             f"val_mpjpe={val_metrics['mpjpe']:.6f} "
             f"val_pck_0_2={val_metrics['pck_0_2']:.6f} "
             f"lr={current_lr:.2e} "
@@ -436,7 +578,7 @@ def run_training(config: TrainConfig) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the WiFlow pose model.")
+    parser = argparse.ArgumentParser(description="Train the WiFlow pose model with domain adaptation.")
     parser.add_argument("--dataset-root", required=True, help="Path to the NPY memmap dataset directory.")
     parser.add_argument("--output-dir", default="outputs/train", help="Directory for logs and checkpoints.")
     parser.add_argument("--axial-mode", default="spatial_then_temporal", choices=AXIAL_ENCODER_MODES)
@@ -444,12 +586,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)
+    # DA arguments
+    parser.add_argument("--source-envs", nargs="+", default=["lab"],
+                        help="Source domain environment names.")
+    parser.add_argument("--target-envs", nargs="+", default=["corridor"],
+                        help="Target domain environment names.")
+    parser.add_argument("--alpha", type=float, default=0.1,
+                        help="ICAL loss weight.")
+    parser.add_argument("--ical-warmup-epochs", type=int, default=5,
+                        help="Number of epochs to linearly ramp up ICAL alpha.")
+    parser.add_argument("--no-cece", action="store_true", default=False,
+                        help="Disable CECE channel reweighting.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    config = TrainConfig(**vars(args))
+    config_dict = vars(args)
+    # Map CLI flags to config fields
+    config_dict["cece_enabled"] = not config_dict.pop("no_cece")
+    # Convert lists to tuples for frozen dataclass
+    config_dict["source_envs"] = tuple(config_dict["source_envs"])
+    config_dict["target_envs"] = tuple(config_dict["target_envs"])
+    # Remove keys not in TrainConfig
+    config = TrainConfig(**{
+        k: v for k, v in config_dict.items()
+        if k in TrainConfig.__dataclass_fields__
+    })
     run_training(config)
 
 
