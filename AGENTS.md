@@ -70,11 +70,37 @@ Run tests (from project root):
 pytest
 ```
 
-Quick training sanity check:
+Domain adaptation (cross-environment) training:
 
 ```powershell
-python train.py --dataset-root data\mmfi_pose --epochs 5 --subset-size 32 --output-dir outputs\sanity
+python train.py --dataset-root data\mmfi_pose --source-envs lab --target-envs corridor --epochs 50 --batch-size 64 --output-dir outputs\train_da
 ```
+
+Disable CECE (ICAL-only ablation):
+
+```powershell
+python train.py --dataset-root data\mmfi_pose --source-envs lab --target-envs corridor --no-cece --output-dir outputs\train_da_no_cece
+```
+
+Adjust ICAL strength and warmup:
+
+```powershell
+python train.py --dataset-root data\mmfi_pose --source-envs lab --target-envs corridor --alpha 0.5 --ical-warmup-epochs 10 --output-dir outputs\train_da_alpha05
+```
+
+Decoder ablation with DA:
+
+```powershell
+python train.py --dataset-root data\mmfi_pose --source-envs lab --target-envs corridor --decoder-type hierarchical --output-dir outputs\train_da_hierarchical
+```
+
+Quick DA sanity check (2 epochs):
+
+```powershell
+python train.py --dataset-root data\mmfi_pose --source-envs lab --target-envs corridor --epochs 2 --batch-size 4 --output-dir outputs\sanity_da
+```
+
+Supported `--source-envs` / `--target-envs` values: environment names from the dataset (e.g., "lab", "corridor").
 
 Default training:
 
