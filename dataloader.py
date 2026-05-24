@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 from torch.utils.data import DataLoader
@@ -72,6 +72,68 @@ def create_memmap_data_loaders(
             seed=seed,
         )
         for split in SPLIT_NAMES
+    }
+
+
+def create_da_data_loaders(
+    data_dir: str | Path,
+    source_envs: Sequence[str],
+    target_envs: Sequence[str],
+    batch_size: int,
+    num_workers: int = 0,
+    seed: int = 42,
+) -> dict[str, DataLoader]:
+    """Create DataLoaders for domain-adaptation training.
+
+    Source domain uses all filtered data (``split="all"``, no val split).
+    Target domain is split into train / val / test by subject (80/20).
+
+    Returns a dict with keys:
+      ``"source_train"``, ``"target_train"``, ``"target_val"``, ``"target_test"``.
+    """
+    source_dataset = MemmapDataset(
+        data_dir=data_dir,
+        split="all",
+        envs=list(source_envs),
+        seed=seed,
+        build_targets=False,
+    )
+    source_loader = DataLoader(
+        source_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=memmap_collate_fn,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+    )
+
+    target_loaders: dict[str, DataLoader] = {}
+    for split in SPLIT_NAMES:  # ("train", "val", "test")
+        # NOTE: MemmapDataset._build_split treats "test" identically to
+        # "val" (both return val_indices).  target_test and target_val
+        # currently reference the same data subset.
+        dataset = MemmapDataset(
+            data_dir=data_dir,
+            split=split,
+            envs=list(target_envs),
+            seed=seed,
+            build_targets=False,
+        )
+        should_shuffle = split == "train"
+        target_loaders[f"target_{split}"] = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=should_shuffle,
+            num_workers=num_workers,
+            collate_fn=memmap_collate_fn,
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
+        )
+
+    return {
+        "source_train": source_loader,
+        **target_loaders,
     }
 
 
