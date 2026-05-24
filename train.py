@@ -12,10 +12,10 @@ import torch.nn.functional as F
 from torch import nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LRScheduler, OneCycleLR
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
-from dataloader import create_memmap_data_loaders
-from models import AXIAL_ENCODER_MODES, DECODER_TYPES, OPENPOSE_BONE_EDGES, WiFlowModel
+from dataloader import create_da_data_loaders
+from models import AXIAL_ENCODER_MODES, CECEModule, DECODER_TYPES, OPENPOSE_BONE_EDGES, WiFlowModel
 from pose_targets import build_pcm_paf_targets
 
 
@@ -128,6 +128,45 @@ def compute_losses(
         "pcm_loss": zero,
         "paf_loss": zero,
     }
+
+
+def compute_ical_loss(
+    f_s: torch.Tensor,
+    f_t: torch.Tensor,
+    y_s_gt: torch.Tensor,
+    y_t_pred: torch.Tensor,
+    sigma_pose: float = 0.5,
+) -> torch.Tensor:
+    """Instance-level consistency alignment loss.
+
+    Reweights feature-space distances by pose similarity so that
+    source-target pairs with similar poses are aligned more strongly.
+
+    Args:
+        f_s:       Source features after CECE reweighting + GAP, shape [B, D].
+        f_t:       Target features after CECE reweighting + GAP, shape [B, D].
+        y_s_gt:    Source ground-truth keypoints, shape [B, 18, 2].
+        y_t_pred:  Target predicted keypoints, shape [B, 18, 2].
+        sigma_pose: Temperature for pose-distance → similarity mapping.
+
+    Returns:
+        Scalar ICAL loss.
+    """
+    y_s_flat = y_s_gt.flatten(1)                            # [B, 36]
+    y_t_flat = y_t_pred.flatten(1)                          # [B, 36]
+
+    # Pairwise pose distances
+    pose_dist = torch.cdist(y_s_flat, y_t_flat)             # [B, B]
+
+    # Pose similarity weights with row-wise normalisation
+    weights = torch.exp(-pose_dist / sigma_pose)            # [B, B]
+    weights = weights / weights.sum(dim=1, keepdim=True)    # row-normalised
+
+    # Weighted squared L2 feature distances
+    f_dist_sq = torch.cdist(f_s, f_t, p=2).pow(2)          # [B, B]
+
+    # Divide by B to keep loss magnitude stable across batch sizes
+    return (weights * f_dist_sq).sum() / f_s.shape[0]
 
 
 def compute_torso_scale(target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
