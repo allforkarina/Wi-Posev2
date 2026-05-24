@@ -108,7 +108,7 @@ Default training:
 python train.py --dataset-root data\mmfi_pose --epochs 50 --batch-size 64 --output-dir outputs\train
 ```
 
-Default config: CSI amplitude (3ch), `OneCycleLR` (cosine annealing, pct_start=0.3), gradient clipping (norm=1.0), `coord_l1 + 0.5 * bone_l1` for direct decoders (or multi-stage PCM/PAF MSE for heatmap decoders), AdamW (lr=2e-5, max_lr=5e-4, weight_decay=5e-4).
+Default config: CSI amplitude (3ch), `OneCycleLR` (cosine annealing, pct_start=0.3), gradient clipping (norm=1.0), `(source_coord_l1 + target_coord_l1) / 2 + (source_bone_l1 + target_bone_l1) / 2 * 0.5 + alpha * ICAL` for direct decoders, AdamW (lr=2e-5, max_lr=5e-4, weight_decay=5e-4). Default source="lab", target="corridor", alpha=0.1, ical_warmup_epochs=5.
 
 Axial encoder ablation:
 
