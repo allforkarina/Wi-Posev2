@@ -32,24 +32,29 @@ class TrainConfig:
     decoder_type: str = "joint"
     epochs: int = 50
     batch_size: int = 64
-    lr: float = 2e-5
-    max_lr: float = 5e-4
-    weight_decay: float = 5e-4
+    lr: float = 1e-5
+    max_lr: float = 2e-4
+    weight_decay: float = 1e-3
     grad_clip_norm: float = 1.0
     bone_loss_weight: float = 0.5
     heatmap_size: int = 36
     heatmap_sigma: float = 1.5
     paf_width: float = 1.0
     paf_loss_weight: float = 1.0
-    num_workers: int = 4
+    num_workers: int = 8
     device: str = "cuda"
     seed: int = 42
     # DA fields
     source_envs: tuple[str, ...] = ("lab",)
     target_envs: tuple[str, ...] = ("corridor",)
-    alpha: float = 0.1
-    ical_warmup_epochs: int = 5
+    alpha: float = 0.05
+    ical_warmup_epochs: int = 10
+    ical_sigma_pose: float = 1.0
     cece_enabled: bool = True
+    # Regularization / training
+    dropout: float = 0.1
+    amp: bool = True
+    early_stopping_patience: int = 15
 
 
 def prepare_model_input(
@@ -140,7 +145,7 @@ def compute_ical_loss(
     f_t: torch.Tensor,
     y_s_gt: torch.Tensor,
     y_t_pred: torch.Tensor,
-    sigma_pose: float = 0.5,
+    sigma_pose: float = 1.0,
 ) -> torch.Tensor:
     """Instance-level consistency alignment loss.
 
@@ -217,6 +222,7 @@ def run_da_epoch(
     epoch: int,
     optimizer: AdamW | None = None,
     scheduler: LRScheduler | None = None,
+    scaler: torch.cuda.amp.GradScaler | None = None,
 ) -> Dict[str, float]:
     """Run one epoch of dual-domain training.
 
@@ -239,6 +245,7 @@ def run_da_epoch(
     target_sample_count = 0
     step_count = 0
     source_iter = iter(source_loader)
+    use_amp = scaler is not None
 
     for batch_t in target_loader:
         # --- source batch (cycle with re-shuffle) ---
@@ -255,51 +262,63 @@ def run_da_epoch(
         bs_t = x_t.shape[0]
 
         with torch.set_grad_enabled(is_training):
-            # Forward: spatial → axial
-            feat_s = model.axial_encoder(model.spatial_encoder(x_s))
-            feat_t = model.axial_encoder(model.spatial_encoder(x_t))
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                # Forward: spatial → axial
+                feat_s = model.axial_encoder(model.spatial_encoder(x_s))
+                feat_t = model.axial_encoder(model.spatial_encoder(x_t))
 
-            # CECE channel reweighting
-            if criterion_config.cece_enabled and cece is not None:
-                feat_s_ce, feat_t_ce = cece(feat_s, feat_t)
-            else:
-                feat_s_ce, feat_t_ce = feat_s, feat_t
+                # CECE channel reweighting
+                if criterion_config.cece_enabled and cece is not None:
+                    feat_s_ce, feat_t_ce = cece(feat_s, feat_t)
+                else:
+                    feat_s_ce, feat_t_ce = feat_s, feat_t
 
-            # Decode
-            y_s = model.decode_features(feat_s_ce)
-            y_t = model.decode_features(feat_t_ce)
+                # Decode
+                y_s = model.decode_features(feat_s_ce)
+                y_t = model.decode_features(feat_t_ce)
 
-            # Supervised losses
-            losses_s = compute_losses(
-                y_s,
-                kp_s_gt,
-                bone_loss_weight=criterion_config.bone_loss_weight,
-            )
-            losses_t = compute_losses(
-                y_t,
-                kp_t_gt,
-                bone_loss_weight=criterion_config.bone_loss_weight,
-            )
+                # Supervised losses
+                losses_s = compute_losses(
+                    y_s,
+                    kp_s_gt,
+                    bone_loss_weight=criterion_config.bone_loss_weight,
+                )
+                losses_t = compute_losses(
+                    y_t,
+                    kp_t_gt,
+                    bone_loss_weight=criterion_config.bone_loss_weight,
+                )
 
-            # ICAL loss
-            f_s_pooled = feat_s_ce.mean(dim=[2, 3])           # GAP → [B, 256]
-            f_t_pooled = feat_t_ce.mean(dim=[2, 3])           # GAP → [B, 256]
-            y_s_keypoints = extract_prediction_keypoints(y_s)
-            y_t_keypoints = extract_prediction_keypoints(y_t)
-            loss_ical = compute_ical_loss(
-                f_s_pooled, f_t_pooled, kp_s_gt, y_t_keypoints,
-            )
+                # ICAL loss
+                f_s_pooled = feat_s_ce.mean(dim=[2, 3])           # GAP → [B, 256]
+                f_t_pooled = feat_t_ce.mean(dim=[2, 3])           # GAP → [B, 256]
+                y_s_keypoints = extract_prediction_keypoints(y_s)
+                y_t_keypoints = extract_prediction_keypoints(y_t)
+                loss_ical = compute_ical_loss(
+                    f_s_pooled, f_t_pooled, kp_s_gt, y_t_keypoints,
+                    sigma_pose=criterion_config.ical_sigma_pose,
+                )
 
-            loss = (losses_s["loss"] + losses_t["loss"]) / 2.0 + actual_alpha * loss_ical
+                loss = (losses_s["loss"] + losses_t["loss"]) / 2.0 + actual_alpha * loss_ical
 
             if is_training:
                 optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    max_norm=criterion_config.grad_clip_norm,
-                )
-                optimizer.step()
+                if use_amp:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        max_norm=criterion_config.grad_clip_norm,
+                    )
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        max_norm=criterion_config.grad_clip_norm,
+                    )
+                    optimizer.step()
                 if scheduler is not None:
                     scheduler.step()
 
@@ -445,6 +464,7 @@ def run_training(config: TrainConfig) -> None:
         axial_mode=config.axial_mode,
         decoder_type=config.decoder_type,
         heatmap_size=config.heatmap_size,
+        dropout=config.dropout,
     ).to(device)
 
     cece = CECEModule(num_channels=256).to(device) if config.cece_enabled else None
@@ -461,11 +481,14 @@ def run_training(config: TrainConfig) -> None:
         final_div_factor=1000.0,
     )
 
+    scaler = torch.cuda.amp.GradScaler(enabled=config.amp and device.type == "cuda")
+
     # Sanity check
     first_batch = next(iter(target_train_loader))
     model_input, target = prepare_model_input(first_batch, device)
     with torch.no_grad():
-        output = model(model_input)
+        with torch.amp.autocast("cuda", enabled=scaler.is_enabled()):
+            output = model(model_input)
     keypoint_output = extract_prediction_keypoints(output)
     print(
         "Sanity shapes: "
@@ -478,6 +501,7 @@ def run_training(config: TrainConfig) -> None:
 
     best_val_mpjpe = float("inf")
     best_val_pck_0_2 = -float("inf")
+    patience_counter = 0
     log_path = output_dir / "train_log.csv"
     for epoch in range(1, config.epochs + 1):
         start_time = time.perf_counter()
@@ -491,6 +515,7 @@ def run_training(config: TrainConfig) -> None:
             epoch=epoch,
             optimizer=optimizer,
             scheduler=scheduler,
+            scaler=scaler,
         )
         val_metrics = run_val_epoch(model, target_val_loader, config, device)
         current_lr = optimizer.param_groups[0]["lr"]
@@ -544,6 +569,7 @@ def run_training(config: TrainConfig) -> None:
         )
         if val_metrics["mpjpe"] < best_val_mpjpe:
             best_val_mpjpe = val_metrics["mpjpe"]
+            patience_counter = 0
             save_checkpoint(
                 output_dir / "best_val_mpjpe.pth",
                 model,
@@ -553,6 +579,8 @@ def run_training(config: TrainConfig) -> None:
                 best_metric=best_val_mpjpe,
                 config=config,
             )
+        else:
+            patience_counter += 1
         if val_metrics["pck_0_2"] > best_val_pck_0_2:
             best_val_pck_0_2 = val_metrics["pck_0_2"]
             save_checkpoint(
@@ -576,6 +604,10 @@ def run_training(config: TrainConfig) -> None:
             f"epoch_time={epoch_time:.1f}s"
         )
 
+        if patience_counter >= config.early_stopping_patience:
+            print(f"Early stopping at epoch {epoch} (no improvement for {patience_counter} epochs)")
+            break
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the WiFlow pose model with domain adaptation.")
@@ -585,16 +617,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decoder-type", default="joint", choices=DECODER_TYPES)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=1e-5, help="Initial learning rate.")
+    parser.add_argument("--max-lr", type=float, default=2e-4, help="Peak learning rate for OneCycleLR.")
+    parser.add_argument("--weight-decay", type=float, default=1e-3, help="AdamW weight decay.")
+    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate for attention layers.")
+    parser.add_argument("--no-amp", action="store_true", default=False,
+                        help="Disable automatic mixed precision.")
+    parser.add_argument("--early-stopping-patience", type=int, default=15,
+                        help="Stop training after N epochs without val_mpjpe improvement.")
     # DA arguments
     parser.add_argument("--source-envs", nargs="+", default=["lab"],
                         help="Source domain environment names.")
     parser.add_argument("--target-envs", nargs="+", default=["corridor"],
                         help="Target domain environment names.")
-    parser.add_argument("--alpha", type=float, default=0.1,
+    parser.add_argument("--alpha", type=float, default=0.05,
                         help="ICAL loss weight.")
-    parser.add_argument("--ical-warmup-epochs", type=int, default=5,
+    parser.add_argument("--ical-warmup-epochs", type=int, default=10,
                         help="Number of epochs to linearly ramp up ICAL alpha.")
+    parser.add_argument("--ical-sigma-pose", type=float, default=1.0,
+                        help="Temperature for ICAL pose-distance -> similarity mapping.")
     parser.add_argument("--no-cece", action="store_true", default=False,
                         help="Disable CECE channel reweighting.")
     return parser.parse_args()
@@ -605,6 +647,7 @@ def main() -> None:
     config_dict = vars(args)
     # Map CLI flags to config fields
     config_dict["cece_enabled"] = not config_dict.pop("no_cece")
+    config_dict["amp"] = not config_dict.pop("no_amp")
     # Convert lists to tuples for frozen dataclass
     config_dict["source_envs"] = tuple(config_dict["source_envs"])
     config_dict["target_envs"] = tuple(config_dict["target_envs"])

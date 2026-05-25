@@ -15,7 +15,7 @@ AXIAL_ENCODER_MODES: tuple[str, ...] = (
 class WiFlowAxialEncoder(nn.Module):
     """Axial attention encoder from [B, 128, 29, 10] to [B, 256, 29, 10]."""
 
-    def __init__(self, mode: str = "spatial_then_temporal") -> None:
+    def __init__(self, mode: str = "spatial_then_temporal", dropout: float = 0.1) -> None:
         super().__init__()
         if mode not in AXIAL_ENCODER_MODES:
             raise ValueError(f"Unsupported axial encoder mode {mode!r}; choose from {AXIAL_ENCODER_MODES}")
@@ -27,14 +27,14 @@ class WiFlowAxialEncoder(nn.Module):
             embed_dim=self.input_channels,
             num_heads=self.num_heads,
             batch_first=True,
-            dropout=0.0,
+            dropout=dropout,
         )
         self.spatial_norm = nn.LayerNorm(self.input_channels)
         self.temporal_attention = nn.MultiheadAttention(
             embed_dim=self.input_channels,
             num_heads=self.num_heads,
             batch_first=True,
-            dropout=0.0,
+            dropout=dropout,
         )
         self.temporal_norm = nn.LayerNorm(self.input_channels)
         self.channel_projection = nn.Conv2d(self.input_channels, self.output_channels, kernel_size=1)
