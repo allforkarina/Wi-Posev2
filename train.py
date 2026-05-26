@@ -33,10 +33,11 @@ class TrainConfig:
     epochs: int = 50
     batch_size: int = 64
     lr: float = 1e-5
-    max_lr: float = 2e-4
+    max_lr: float = 1e-4
     weight_decay: float = 1e-3
     grad_clip_norm: float = 1.0
     bone_loss_weight: float = 0.5
+    pct_start: float = 0.2
     heatmap_size: int = 36
     heatmap_sigma: float = 1.5
     paf_width: float = 1.0
@@ -262,7 +263,7 @@ def run_da_epoch(
         bs_t = x_t.shape[0]
 
         with torch.set_grad_enabled(is_training):
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast(device.type, enabled=use_amp):
                 # Forward: spatial → axial
                 feat_s = model.axial_encoder(model.spatial_encoder(x_s))
                 feat_t = model.axial_encoder(model.spatial_encoder(x_t))
@@ -292,10 +293,8 @@ def run_da_epoch(
                 # ICAL loss
                 f_s_pooled = feat_s_ce.mean(dim=[2, 3])           # GAP → [B, 256]
                 f_t_pooled = feat_t_ce.mean(dim=[2, 3])           # GAP → [B, 256]
-                y_s_keypoints = extract_prediction_keypoints(y_s)
-                y_t_keypoints = extract_prediction_keypoints(y_t)
                 loss_ical = compute_ical_loss(
-                    f_s_pooled, f_t_pooled, kp_s_gt, y_t_keypoints,
+                    f_s_pooled, f_t_pooled, kp_s_gt, kp_t_gt,
                     sigma_pose=criterion_config.ical_sigma_pose,
                 )
 
@@ -475,19 +474,19 @@ def run_training(config: TrainConfig) -> None:
         max_lr=config.max_lr,
         epochs=config.epochs,
         steps_per_epoch=len(target_train_loader),
-        pct_start=0.3,
+        pct_start=config.pct_start,
         anneal_strategy="cos",
         div_factor=config.max_lr / max(config.lr, 1e-8),
         final_div_factor=1000.0,
     )
 
-    scaler = torch.cuda.amp.GradScaler(enabled=config.amp and device.type == "cuda")
+    scaler = torch.amp.GradScaler(device.type, enabled=config.amp and device.type == "cuda")
 
     # Sanity check
     first_batch = next(iter(target_train_loader))
     model_input, target = prepare_model_input(first_batch, device)
     with torch.no_grad():
-        with torch.amp.autocast("cuda", enabled=scaler.is_enabled()):
+        with torch.amp.autocast(device.type, enabled=scaler.is_enabled()):
             output = model(model_input)
     keypoint_output = extract_prediction_keypoints(output)
     print(
@@ -619,8 +618,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-5, help="Initial learning rate.")
-    parser.add_argument("--max-lr", type=float, default=2e-4, help="Peak learning rate for OneCycleLR.")
+    parser.add_argument("--max-lr", type=float, default=1e-4, help="Peak learning rate for OneCycleLR.")
     parser.add_argument("--weight-decay", type=float, default=1e-3, help="AdamW weight decay.")
+    parser.add_argument("--pct-start", type=float, default=0.2,
+                        help="Fraction of training spent warming up LR in OneCycleLR.")
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate for attention layers.")
     parser.add_argument("--no-amp", action="store_true", default=False,
                         help="Disable automatic mixed precision.")
