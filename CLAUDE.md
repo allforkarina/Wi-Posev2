@@ -11,18 +11,20 @@ conda activate WiFiPose
 
 **Linux server:**
 ```bash
-# Connect to server and set up environment
+# 1. Connect to server
 ssh user@<server-ip>
+
+# 2. Activate environment and pull latest code
 conda activate WiFiPose
 cd /path/to/Wi-Posev2
-git pull
+git pull origin main
 
-# Training (runs on GPU)
+# 3. Training (runs on GPU)
 python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose_v3 \
     --source-envs lab --target-envs corridor \
     --epochs 50 --batch-size 64 --output-dir outputs/train_da
 
-# Evaluation with visualizations
+# 4. Evaluation with visualizations
 python eval.py --dataset-root /data/WiFiPose/dataset/mmfi_pose_v3 \
     --checkpoint outputs/train_da/best_val_mpjpe.pth \
     --output-dir outputs/eval \
@@ -30,7 +32,7 @@ python eval.py --dataset-root /data/WiFiPose/dataset/mmfi_pose_v3 \
     --source-env lab --target-env corridor \
     --output-format both
 
-# Download visualization outputs for local viewing
+# 5. Download visualization outputs for local viewing
 scp -r user@<server-ip>:/path/to/Wi-Posev2/outputs/eval/feature_viz/ .
 ```
 
