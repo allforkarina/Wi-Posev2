@@ -39,11 +39,12 @@ from train import extract_prediction_keypoints, prepare_model_input
 # ---------------------------------------------------------------------------
 
 FONT_FAMILY = "DejaVu Sans"
+_FONT_FAMILY_SERIF = "DejaVu Serif"
 _ANATOMY_COLORS = {
-    "head":   "#E05C30",
-    "upper":  "#534AB7",
-    "trunk":  "#1D9E75",
-    "lower":  "#378ADD",
+    "head":   "#C46A4A",
+    "upper":  "#5B55A1",
+    "trunk":  "#3B8A6A",
+    "lower":  "#4F7EBF",
 }
 _ANATOMY_GROUPS = {
     "head":   [0, 1, 14, 15, 16, 17],
@@ -59,21 +60,29 @@ _JOINT_NAMES = [
 ]
 
 _GLOBAL_SPACING = dict(
-    hspace=0.45, wspace=0.35,
-    left=0.07, right=0.93, top=0.92, bottom=0.06,
+    hspace=0.50, wspace=0.38,
+    left=0.06, right=0.94, top=0.93, bottom=0.05,
 )
 
 plt.rcParams.update({
     "font.family": FONT_FAMILY,
     "font.size": 9,
     "axes.titlesize": 11,
-    "axes.labelsize": 10,
-    "xtick.labelsize": 9,
-    "ytick.labelsize": 9,
+    "axes.labelsize": 9,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
     "figure.dpi": 100,
     "savefig.dpi": 300,
     "savefig.bbox": "tight",
+    "savefig.facecolor": "#FAFAFA",
     "image.interpolation": "nearest",
+    "axes.facecolor": "#FCFCFC",
+    "axes.edgecolor": "#CCCCCC",
+    "axes.grid": True,
+    "grid.alpha": 0.25,
+    "grid.color": "#D0D0D0",
+    "grid.linestyle": "--",
+    "grid.linewidth": 0.4,
 })
 
 
@@ -96,10 +105,11 @@ def _save_fig(fig: plt.Figure, path: Path) -> None:
 
 
 def _add_colorbar(im, ax: plt.Axes, label: str = "") -> None:
-    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
-    cbar.ax.tick_params(labelsize=8)
+    cbar = plt.colorbar(im, ax=ax, fraction=0.038, pad=0.03)
+    cbar.ax.tick_params(labelsize=7)
+    cbar.outline.set_visible(False)
     if label:
-        cbar.set_label(label, fontsize=8)
+        cbar.set_label(label, fontsize=8, color="#555555")
 
 
 def _group_for_joint(j: int) -> str:
@@ -212,8 +222,8 @@ def _fig0_joint_scatter(
         indices = _ANATOMY_GROUPS[group_name]
         ax.scatter(
             target[indices, 0], target[indices, 1],
-            c=group_color, marker="o", s=80, edgecolors="black",
-            linewidths=0.5, zorder=3,
+            c=group_color, marker="o", s=72, edgecolors="#333333",
+            linewidths=0.3, zorder=3, alpha=0.92,
         )
 
     # --- Prediction: hollow diamonds ---
@@ -221,30 +231,32 @@ def _fig0_joint_scatter(
         indices = _ANATOMY_GROUPS[group_name]
         ax.scatter(
             prediction[indices, 0], prediction[indices, 1],
-            facecolors="none", marker="D", s=80, edgecolors=group_color,
-            linewidths=1.2, zorder=2,
+            facecolors="none", marker="D", s=64, edgecolors=group_color,
+            linewidths=1.0, zorder=2, alpha=0.85,
         )
 
     # --- Legend (2 entries: GT vs Pred) ---
     from matplotlib.lines import Line2D
     legend_elements = [
-        Line2D([0], [0], marker="o", color="w", markerfacecolor="gray",
-               markeredgecolor="black", markersize=8, label="GT"),
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="#888888",
+               markeredgecolor="#333333", markersize=8, label="GT"),
         Line2D([0], [0], marker="D", color="w", markerfacecolor="white",
-               markeredgecolor="gray", markersize=8, label="Prediction"),
+               markeredgecolor="#888888", markersize=8, label="Prediction"),
     ]
-    ax.legend(handles=legend_elements, loc="upper right", fontsize=9)
+    ax.legend(handles=legend_elements, loc="upper right", fontsize=9,
+              framealpha=0.85, edgecolor="#DDDDDD", borderpad=0.8)
 
     ax.set_xlim(x_min - x_pad, x_max + x_pad)
     ax.set_ylim(y_max + y_pad, y_min - y_pad)  # invert for natural pose
     ax.set_aspect("equal")
-    ax.set_xlabel("Normalized X")
-    ax.set_ylabel("Normalized Y")
+    ax.set_xlabel("Normalized X", color="#666666")
+    ax.set_ylabel("Normalized Y", color="#666666")
     ax.set_title(
         f"Joint Prediction vs GT — {sample['action']} / {sample['environment']}",
-        fontsize=12, fontweight="bold",
+        fontsize=12, fontweight="bold", color="#333333", pad=10,
     )
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, alpha=0.3, color="#D0D0D0", linestyle="--", linewidth=0.4)
+    ax.tick_params(colors="#888888")
 
     _apply_spacing(fig)
     _save_fig(fig, sample_dir / "fig0_joint_scatter")
@@ -298,7 +310,8 @@ def _fig1_antenna_channel(
     sep_ax = axes[3]
     sep_ax.axis("off")
     sep_ax.text(0.5, 0.5, "antenna\nmixer  \u2192",
-                ha="center", va="center", fontsize=11, fontweight="bold")
+                ha="center", va="center", fontsize=11, fontweight="bold",
+                color="#888888")
 
     # --- output columns ---
     im_last = None
@@ -335,7 +348,7 @@ def _fig1_antenna_channel(
     fig.suptitle(
         f"Antenna Channel Response Analysis — "
         f"{sample['action']} / {sample['environment']}",
-        fontsize=14, fontweight="bold",
+        fontsize=13, fontweight="bold", color="#333333",
     )
     _apply_spacing(fig)
     _save_fig(fig, output_dir / "fig1_antenna_channel")
@@ -365,7 +378,7 @@ def _fig2_downsampling_trajectory(
         "ResBlock 2 output\n[128, 16, 29]",
         "ResBlock 3 output\n[128, 16, 29]",
     ]
-    stage_colors = ["#534AB7", "#1D9E75", "#D85A30"]
+    stage_colors = ["#5B55A1", "#3B8A6A", "#C46A4A"]
 
     fig, axes = plt.subplots(2, 4, figsize=(18, 6))
 
@@ -414,7 +427,7 @@ def _fig2_downsampling_trajectory(
     fig.suptitle(
         f"Symmetric Downsampling Trajectory — "
         f"{sample['action']} / {sample['environment']}",
-        fontsize=14, fontweight="bold",
+        fontsize=13, fontweight="bold", color="#333333",
     )
     _apply_spacing(fig)
     _save_fig(fig, output_dir / "fig2_downsampling_trajectory")
@@ -499,7 +512,7 @@ def _fig3_axial_attention(
 
     fig.suptitle(
         f"Axial Attention Maps — {sample['action']} / {sample['environment']}",
-        fontsize=14, fontweight="bold",
+        fontsize=13, fontweight="bold", color="#333333",
     )
     _apply_spacing(fig)
     _save_fig(fig, output_dir / "fig3_axial_attention")
@@ -627,7 +640,7 @@ def _fig4_joint_query_trajectory(
 
     fig.suptitle(
         f"Joint Query Trajectory — {sample['action']} / {sample['environment']}",
-        fontsize=14, fontweight="bold",
+        fontsize=13, fontweight="bold", color="#333333",
     )
     _apply_spacing(fig)
     _save_fig(fig, output_dir / "fig4_joint_query_trajectory")
@@ -665,7 +678,7 @@ def _fig5a_pcm_radar(
     fig = plt.figure(figsize=(10, 10))
     ax = fig.add_subplot(1, 1, 1, projection="polar")
 
-    stage_colors = ["#B5D4F4", "#378ADD", "#0C447C"]
+    stage_colors = ["#C4D6EC", "#4F7EBF", "#2B4F7C"]
     stage_styles = ["--", "-.", "-"]
     for s, peaks in enumerate(peak_responses[:3]):
         vals = peaks.tolist() + peaks[:1].tolist()
@@ -707,14 +720,14 @@ def _fig5b_paf_direction_consistency(
     gt_norm = gt.copy()
 
     fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_facecolor("#F5F5F5")
+    ax.set_facecolor("#FCFCFC")
 
     # Draw skeleton background
     for start, end in OPENPOSE_BONE_EDGES:
         ax.plot(
             [gt_norm[start, 0], gt_norm[end, 0]],
             [gt_norm[start, 1], gt_norm[end, 1]],
-            color="#CCCCCC", linewidth=1.0,
+            color="#D8D8D8", linewidth=0.8,
         )
 
     # Sample points along each bone and compute predicted direction consistency
@@ -755,8 +768,10 @@ def _fig5b_paf_direction_consistency(
     # colorbar
     sm = plt.cm.ScalarMappable(cmap="RdYlGn", norm=plt.Normalize(0, 1))
     sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.02)
-    cbar.set_label("PAF cosine similarity", fontsize=8)
+    cbar = plt.colorbar(sm, ax=ax, fraction=0.038, pad=0.03)
+    cbar.set_label("PAF cosine similarity", fontsize=8, color="#555555")
+    cbar.outline.set_visible(False)
+    cbar.ax.tick_params(labelsize=7)
 
     _save_fig(fig, output_dir / "fig5b_paf_direction")
 
@@ -843,10 +858,11 @@ def _fig6_global_correlation(
             ax.set_ylabel("subcarrier token")
 
     # shared colorbar
-    cbar_ax = fig.add_axes([0.94, 0.08, 0.012, 0.84])
+    cbar_ax = fig.add_axes([0.94, 0.08, 0.010, 0.84])
     cbar = fig.colorbar(im, cax=cbar_ax)
-    cbar.set_label("Pearson r", fontsize=8)
-    cbar.ax.tick_params(labelsize=8)
+    cbar.set_label("Pearson r", fontsize=8, color="#555555")
+    cbar.ax.tick_params(labelsize=7, colors="#888888")
+    cbar.outline.set_visible(False)
 
     # anatomical group borders (dashed rectangles around rows)
     group_colors = [_ANATOMY_COLORS["head"], _ANATOMY_COLORS["upper"], _ANATOMY_COLORS["lower"]]
@@ -867,7 +883,7 @@ def _fig6_global_correlation(
         fig.patches.append(rect)
 
     fig.suptitle("Feature-Pose Correlation Landscape (Encoder Output \u00d7 Joint Coordinates)",
-                 fontsize=14, fontweight="bold")
+                 fontsize=13, fontweight="bold", color="#333333")
     _apply_spacing(fig)
     # Adjust right margin for shared colorbar
     fig.subplots_adjust(right=0.93)
@@ -998,7 +1014,7 @@ def _build_overview(
         ax.set_title(f"Fig {idx + 1}", fontsize=12, fontweight="bold", loc="left")
         ax.axis("off")
 
-    fig.suptitle("Feature Visualization Overview", fontsize=14, fontweight="bold")
+    fig.suptitle("Feature Visualization Overview", fontsize=13, fontweight="bold", color="#333333")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     _save_fig(fig, output_dir / "overview")
 
@@ -1087,7 +1103,7 @@ def _build_action_composites(
 
         fig.suptitle(
             f"Action: {action}  ({n_envs} environments sampled)",
-            fontsize=14, fontweight="bold",
+            fontsize=13, fontweight="bold", color="#333333",
         )
         fig.tight_layout(rect=[0, 0, 1, 0.94])
         _save_fig(fig, actions_dir / f"composite_{action}")
