@@ -31,7 +31,7 @@ class TrainConfig:
     axial_mode: str = "spatial_then_temporal"
     decoder_type: str = "joint"
     epochs: int = 50
-    batch_size: int = 64
+    batch_size: int = 128
     lr: float = 1e-5
     max_lr: float = 1e-4
     weight_decay: float = 1e-3
@@ -56,6 +56,7 @@ class TrainConfig:
     dropout: float = 0.1
     amp: bool = True
     early_stopping_patience: int = 15
+    val_every: int = 5
 
 
 def prepare_model_input(
@@ -516,13 +517,41 @@ def run_training(config: TrainConfig) -> None:
             scheduler=scheduler,
             scaler=scaler,
         )
-        val_metrics = run_val_epoch(model, target_val_loader, config, device)
         current_lr = optimizer.param_groups[0]["lr"]
         epoch_time = time.perf_counter() - start_time
 
         actual_alpha = config.alpha * min(
             1.0, epoch / max(config.ical_warmup_epochs, 1)
         )
+
+        do_val = epoch % config.val_every == 0 or epoch == config.epochs
+        if do_val:
+            val_metrics = run_val_epoch(model, target_val_loader, config, device)
+            save_checkpoint(
+                output_dir / "last.pth",
+                model, optimizer, scheduler, epoch,
+                best_metric=val_metrics["mpjpe"], config=config,
+            )
+            if val_metrics["mpjpe"] < best_val_mpjpe:
+                best_val_mpjpe = val_metrics["mpjpe"]
+                patience_counter = 0
+                save_checkpoint(
+                    output_dir / "best_val_mpjpe.pth",
+                    model, optimizer, scheduler, epoch,
+                    best_metric=best_val_mpjpe, config=config,
+                )
+            else:
+                patience_counter += 1
+            if val_metrics["pck_0_2"] > best_val_pck_0_2:
+                best_val_pck_0_2 = val_metrics["pck_0_2"]
+                save_checkpoint(
+                    output_dir / "best_val_pck_0_2.pth",
+                    model, optimizer, scheduler, epoch,
+                    best_metric=best_val_pck_0_2, config=config,
+                )
+        else:
+            val_metrics = {}
+            patience_counter = 0  # only count val epochs for early stopping
 
         row: Dict[str, float | int | str] = {
             "epoch": epoch,
@@ -540,14 +569,14 @@ def run_training(config: TrainConfig) -> None:
             "train_target_pck_0_2": train_metrics["target_pck_0_2"],
             "train_ical": train_metrics["ical"],
             "alpha": actual_alpha,
-            "val_loss": val_metrics["loss"],
-            "val_coord_loss": val_metrics["coord_loss"],
-            "val_bone_loss": val_metrics["bone_loss"],
-            "val_pcm_loss": val_metrics["pcm_loss"],
-            "val_paf_loss": val_metrics["paf_loss"],
-            "val_mpjpe": val_metrics["mpjpe"],
-            "val_pck_0_2": val_metrics["pck_0_2"],
-            "val_pck_0_5": val_metrics["pck_0_5"],
+            "val_loss": val_metrics.get("loss", ""),
+            "val_coord_loss": val_metrics.get("coord_loss", ""),
+            "val_bone_loss": val_metrics.get("bone_loss", ""),
+            "val_pcm_loss": val_metrics.get("pcm_loss", ""),
+            "val_paf_loss": val_metrics.get("paf_loss", ""),
+            "val_mpjpe": val_metrics.get("mpjpe", ""),
+            "val_pck_0_2": val_metrics.get("pck_0_2", ""),
+            "val_pck_0_5": val_metrics.get("pck_0_5", ""),
             "heatmap_size": config.heatmap_size,
             "heatmap_sigma": config.heatmap_sigma,
             "paf_width": config.paf_width,
@@ -557,54 +586,30 @@ def run_training(config: TrainConfig) -> None:
         }
         append_csv_row(log_path, row)
 
-        save_checkpoint(
-            output_dir / "last.pth",
-            model,
-            optimizer,
-            scheduler,
-            epoch,
-            best_metric=val_metrics["mpjpe"],
-            config=config,
-        )
-        if val_metrics["mpjpe"] < best_val_mpjpe:
-            best_val_mpjpe = val_metrics["mpjpe"]
-            patience_counter = 0
-            save_checkpoint(
-                output_dir / "best_val_mpjpe.pth",
-                model,
-                optimizer,
-                scheduler,
-                epoch,
-                best_metric=best_val_mpjpe,
-                config=config,
+        if do_val:
+            print(
+                f"epoch={epoch:03d} "
+                f"src_loss={train_metrics['source_loss']:.6f} "
+                f"tgt_loss={train_metrics['target_loss']:.6f} "
+                f"ical={train_metrics['ical']:.6f} "
+                f"val_mpjpe={val_metrics['mpjpe']:.6f} "
+                f"val_pck_0_2={val_metrics['pck_0_2']:.6f} "
+                f"lr={current_lr:.2e} "
+                f"epoch_time={epoch_time:.1f}s"
             )
         else:
-            patience_counter += 1
-        if val_metrics["pck_0_2"] > best_val_pck_0_2:
-            best_val_pck_0_2 = val_metrics["pck_0_2"]
-            save_checkpoint(
-                output_dir / "best_val_pck_0_2.pth",
-                model,
-                optimizer,
-                scheduler,
-                epoch,
-                best_metric=best_val_pck_0_2,
-                config=config,
+            print(
+                f"epoch={epoch:03d} "
+                f"src_loss={train_metrics['source_loss']:.6f} "
+                f"tgt_loss={train_metrics['target_loss']:.6f} "
+                f"ical={train_metrics['ical']:.6f} "
+                f"(skip val) "
+                f"lr={current_lr:.2e} "
+                f"epoch_time={epoch_time:.1f}s"
             )
 
-        print(
-            f"epoch={epoch:03d} "
-            f"src_loss={train_metrics['source_loss']:.6f} "
-            f"tgt_loss={train_metrics['target_loss']:.6f} "
-            f"ical={train_metrics['ical']:.6f} "
-            f"val_mpjpe={val_metrics['mpjpe']:.6f} "
-            f"val_pck_0_2={val_metrics['pck_0_2']:.6f} "
-            f"lr={current_lr:.2e} "
-            f"epoch_time={epoch_time:.1f}s"
-        )
-
         if patience_counter >= config.early_stopping_patience:
-            print(f"Early stopping at epoch {epoch} (no improvement for {patience_counter} epochs)")
+            print(f"Early stopping at epoch {epoch} (no improvement for {patience_counter} val epochs)")
             break
 
 
@@ -615,7 +620,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--axial-mode", default="spatial_then_temporal", choices=AXIAL_ENCODER_MODES)
     parser.add_argument("--decoder-type", default="joint", choices=DECODER_TYPES)
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-5, help="Initial learning rate.")
     parser.add_argument("--max-lr", type=float, default=1e-4, help="Peak learning rate for OneCycleLR.")
@@ -627,6 +632,8 @@ def parse_args() -> argparse.Namespace:
                         help="Disable automatic mixed precision.")
     parser.add_argument("--early-stopping-patience", type=int, default=15,
                         help="Stop training after N epochs without val_mpjpe improvement.")
+    parser.add_argument("--val-every", type=int, default=5,
+                        help="Run validation every N epochs (default: 5).")
     # DA arguments
     parser.add_argument("--source-envs", nargs="+", default=["env1"],
                         help="Source domain environment names.")

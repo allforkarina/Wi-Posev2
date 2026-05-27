@@ -22,7 +22,7 @@ git pull origin main
 # 3. Training (runs on GPU)
 python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose_v3 \
     --source-envs env1 --target-envs env2 \
-    --epochs 50 --batch-size 64 --output-dir outputs/train_da
+    --epochs 50 --batch-size 128 --output-dir outputs/train_da
 
 # 4. Evaluation with visualizations
 python eval.py --dataset-root /data/WiFiPose/dataset/mmfi_pose_v3 \
@@ -67,19 +67,19 @@ Wi-Fi CSI-based single-frame human pose estimation. Input: CSI amplitude from 3 
 pytest
 
 # Standard training
-python train.py --dataset-root data/mmfi_pose --epochs 50 --batch-size 64 --output-dir outputs/train
+python train.py --dataset-root data/mmfi_pose --epochs 50 --batch-size 128 --output-dir outputs/train
 
 # DA training (env1 → env2)
-python train.py --dataset-root data/mmfi_pose --source-envs env1 --target-envs env2 --epochs 50 --batch-size 64 --output-dir outputs/train_da
+python train.py --dataset-root data/mmfi_pose --source-envs env1 --target-envs env2 --epochs 50 --batch-size 128 --output-dir outputs/train_da
 
 # CECE disabled (ICAL-only ablation)
 python train.py --dataset-root data/mmfi_pose --source-envs env1 --target-envs env2 --no-cece --output-dir outputs/train_da_no_cece
 
 # Axial mode ablation
-python train.py --dataset-root data/mmfi_pose --axial-mode parallel_sum --epochs 50 --batch-size 64 --output-dir outputs/train_parallel
+python train.py --dataset-root data/mmfi_pose --axial-mode parallel_sum --epochs 50 --batch-size 128 --output-dir outputs/train_parallel
 
 # Decoder ablation
-python train.py --dataset-root data/mmfi_pose --decoder-type hierarchical --epochs 50 --batch-size 64 --output-dir outputs/train_hier
+python train.py --dataset-root data/mmfi_pose --decoder-type hierarchical --epochs 50 --batch-size 128 --output-dir outputs/train_hier
 
 # Quick sanity check
 python train.py --dataset-root data/mmfi_pose --epochs 2 --batch-size 4 --output-dir outputs/sanity
