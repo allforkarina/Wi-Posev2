@@ -48,15 +48,15 @@ class TrainConfig:
     # DA fields
     source_envs: tuple[str, ...] = ("env1",)
     target_envs: tuple[str, ...] = ("env2",)
-    alpha: float = 0.05
-    ical_warmup_epochs: int = 10
+    alpha: float = 0.01
+    ical_warmup_epochs: int = 20
     ical_sigma_pose: float = 1.0
     cece_enabled: bool = True
     # Regularization / training
     dropout: float = 0.1
     amp: bool = True
-    early_stopping_patience: int = 15
-    val_every: int = 5
+    early_stopping_patience: int = 5
+    val_every: int = 1
 
 
 def prepare_model_input(
@@ -630,18 +630,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate for attention layers.")
     parser.add_argument("--no-amp", action="store_true", default=False,
                         help="Disable automatic mixed precision.")
-    parser.add_argument("--early-stopping-patience", type=int, default=15,
+    parser.add_argument("--early-stopping-patience", type=int, default=5,
                         help="Stop training after N epochs without val_mpjpe improvement.")
-    parser.add_argument("--val-every", type=int, default=5,
-                        help="Run validation every N epochs (default: 5).")
+    parser.add_argument("--val-every", type=int, default=1,
+                        help="Run validation every N epochs (default: 1).")
     # DA arguments
     parser.add_argument("--source-envs", nargs="+", default=["env1"],
                         help="Source domain environment names.")
     parser.add_argument("--target-envs", nargs="+", default=["env2"],
                         help="Target domain environment names.")
-    parser.add_argument("--alpha", type=float, default=0.05,
+    parser.add_argument("--alpha", type=float, default=0.01,
                         help="ICAL loss weight.")
-    parser.add_argument("--ical-warmup-epochs", type=int, default=10,
+    parser.add_argument("--ical-warmup-epochs", type=int, default=20,
                         help="Number of epochs to linearly ramp up ICAL alpha.")
     parser.add_argument("--ical-sigma-pose", type=float, default=1.0,
                         help="Temperature for ICAL pose-distance -> similarity mapping.")
