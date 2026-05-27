@@ -4,9 +4,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Environment
 
+**Local (Windows):**
 ```powershell
 conda activate WiFiPose
 ```
+
+**Linux server:**
+```bash
+# Connect to server and set up environment
+ssh user@<server-ip>
+conda activate WiFiPose
+cd /path/to/Wi-Posev2
+git pull
+
+# Training (runs on GPU)
+python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose_v3 \
+    --source-envs lab --target-envs corridor \
+    --epochs 50 --batch-size 64 --output-dir outputs/train_da
+
+# Evaluation with visualizations
+python eval.py --dataset-root /data/WiFiPose/dataset/mmfi_pose_v3 \
+    --checkpoint outputs/train_da/best_val_mpjpe.pth \
+    --output-dir outputs/eval \
+    --feature-viz --cross-env-viz \
+    --source-env lab --target-env corridor \
+    --output-format both
+
+# Download visualization outputs for local viewing
+scp -r user@<server-ip>:/path/to/Wi-Posev2/outputs/eval/feature_viz/ .
+```
+
+Remote: `git@github.com:allforkarina/Wi-Posev2.git`, branch `main`.
 
 ## Architecture
 
@@ -81,4 +109,9 @@ python scripts/diagnose_loss.py --dataset-root data/mmfi_pose
 - Checkpoints store `model_state_dict`, `optimizer_state_dict`, `scheduler_state_dict`, `epoch`, `best_metric`, and `train_config` (serialized `TrainConfig` dataclass).
 - `tests/` is gitignored (local verification only). `conftest.py` adds project root to `sys.path`.
 - Dataset artifacts (`*.npy`, `*.npz`, `*.h5`, `*.pth`, `*.pt`), virtual environments, and `outputs/` are gitignored.
-- Remote: `git@github.com:allforkarina/Wi-Posev2.git`, branch `main`.
+- After each modification, commit and push to the remote:
+  ```bash
+  git add <changed files>
+  git commit -m "<concise imperative message>"
+  git push origin main
+  ```
