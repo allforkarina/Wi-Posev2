@@ -268,12 +268,12 @@ def parse_args() -> argparse.Namespace:
         help="Generate cross-environment feature difference visualization.",
     )
     parser.add_argument(
-        "--source-env", default="lab",
-        help="Source environment name for cross-env comparison (default: lab).",
+        "--source-env", default="env1",
+        help="Source environment name for cross-env comparison (default: env1).",
     )
     parser.add_argument(
-        "--target-env", default="corridor",
-        help="Target environment name for cross-env comparison (default: corridor).",
+        "--target-env", default="env2",
+        help="Target environment name for cross-env comparison (default: env2).",
     )
     return parser.parse_args()
 

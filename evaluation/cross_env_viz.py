@@ -552,8 +552,8 @@ def run_cross_env_visualization(
     dataset_root: str,
     output_dir: Path,
     device: torch.device,
-    source_env: str = "lab",
-    target_env: str = "corridor",
+    source_env: str = "env1",
+    target_env: str = "env2",
     batch_size: int = 64,
     num_workers: int = 0,
 ) -> None:

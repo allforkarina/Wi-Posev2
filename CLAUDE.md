@@ -21,7 +21,7 @@ git pull origin main
 
 # 3. Training (runs on GPU)
 python train.py --dataset-root /data/WiFiPose/dataset/mmfi_pose_v3 \
-    --source-envs lab --target-envs corridor \
+    --source-envs env1 --target-envs env2 \
     --epochs 50 --batch-size 64 --output-dir outputs/train_da
 
 # 4. Evaluation with visualizations
@@ -29,7 +29,7 @@ python eval.py --dataset-root /data/WiFiPose/dataset/mmfi_pose_v3 \
     --checkpoint outputs/train_da/best_val_mpjpe.pth \
     --output-dir outputs/eval \
     --feature-viz --cross-env-viz \
-    --source-env lab --target-env corridor \
+    --source-env env1 --target-env env2 \
     --output-format both
 
 # 5. Download visualization outputs for local viewing
@@ -69,11 +69,11 @@ pytest
 # Standard training
 python train.py --dataset-root data/mmfi_pose --epochs 50 --batch-size 64 --output-dir outputs/train
 
-# DA training (lab → corridor)
-python train.py --dataset-root data/mmfi_pose --source-envs lab --target-envs corridor --epochs 50 --batch-size 64 --output-dir outputs/train_da
+# DA training (env1 → env2)
+python train.py --dataset-root data/mmfi_pose --source-envs env1 --target-envs env2 --epochs 50 --batch-size 64 --output-dir outputs/train_da
 
 # CECE disabled (ICAL-only ablation)
-python train.py --dataset-root data/mmfi_pose --source-envs lab --target-envs corridor --no-cece --output-dir outputs/train_da_no_cece
+python train.py --dataset-root data/mmfi_pose --source-envs env1 --target-envs env2 --no-cece --output-dir outputs/train_da_no_cece
 
 # Axial mode ablation
 python train.py --dataset-root data/mmfi_pose --axial-mode parallel_sum --epochs 50 --batch-size 64 --output-dir outputs/train_parallel

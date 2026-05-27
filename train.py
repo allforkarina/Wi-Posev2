@@ -46,8 +46,8 @@ class TrainConfig:
     device: str = "cuda"
     seed: int = 42
     # DA fields
-    source_envs: tuple[str, ...] = ("lab",)
-    target_envs: tuple[str, ...] = ("corridor",)
+    source_envs: tuple[str, ...] = ("env1",)
+    target_envs: tuple[str, ...] = ("env2",)
     alpha: float = 0.05
     ical_warmup_epochs: int = 10
     ical_sigma_pose: float = 1.0
@@ -628,9 +628,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early-stopping-patience", type=int, default=15,
                         help="Stop training after N epochs without val_mpjpe improvement.")
     # DA arguments
-    parser.add_argument("--source-envs", nargs="+", default=["lab"],
+    parser.add_argument("--source-envs", nargs="+", default=["env1"],
                         help="Source domain environment names.")
-    parser.add_argument("--target-envs", nargs="+", default=["corridor"],
+    parser.add_argument("--target-envs", nargs="+", default=["env2"],
                         help="Target domain environment names.")
     parser.add_argument("--alpha", type=float, default=0.05,
                         help="ICAL loss weight.")
