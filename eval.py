@@ -263,6 +263,18 @@ def parse_args() -> argparse.Namespace:
         "--figure-height", type=float, default=None,
         help="Override default figure height in inches.",
     )
+    parser.add_argument(
+        "--cross-env-viz", action="store_true", default=False,
+        help="Generate cross-environment feature difference visualization.",
+    )
+    parser.add_argument(
+        "--source-env", default="lab",
+        help="Source environment name for cross-env comparison (default: lab).",
+    )
+    parser.add_argument(
+        "--target-env", default="corridor",
+        help="Target environment name for cross-env comparison (default: corridor).",
+    )
     return parser.parse_args()
 
 
@@ -311,6 +323,24 @@ def main() -> None:
             figure_height=args.figure_height,
         )
         print("Feature visualization complete.")
+
+    # --- cross-environment feature comparison (optional) ---
+    if args.cross_env_viz:
+        from evaluation.cross_env_viz import run_cross_env_visualization
+
+        print("\n--- Cross-Environment Feature Comparison ---")
+        run_cross_env_visualization(
+            model=model,
+            loader=test_loader,
+            dataset_root=args.dataset_root,
+            output_dir=output_dir,
+            device=device,
+            source_env=args.source_env,
+            target_env=args.target_env,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+        )
+        print("Cross-environment visualization complete.")
 
 
 if __name__ == "__main__":
