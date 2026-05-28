@@ -2,16 +2,16 @@ from __future__ import annotations
 
 """NPY memmap-backed dataloader for MM-Fi pose data."""
 
-import argparse
 from pathlib import Path
 from typing import Optional
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from data.memmap_dataset import MemmapDataset
 
 SPLIT_NAMES = ("train", "val", "test")
+ALL_SPLITS = ("train", "val", "test", "all")
 
 
 def memmap_collate_fn(batch: list[dict]) -> dict:
@@ -32,20 +32,21 @@ def create_memmap_data_loader(
     data_dir: str | Path,
     split: str,
     batch_size: int,
+    envs: tuple[str, ...] | None = None,
     num_workers: int = 0,
-    shuffle: Optional[bool] = None,
+    shuffle: bool | None = None,
     seed: int = 42,
 ) -> DataLoader:
-    if split not in SPLIT_NAMES:
-        raise ValueError(f"split must be one of {SPLIT_NAMES}, got {split}")
+    if split not in ALL_SPLITS:
+        raise ValueError(f"split must be one of {ALL_SPLITS}, got {split}")
 
     dataset = MemmapDataset(
         data_dir=data_dir,
         split=split,
+        envs=envs,
         seed=seed,
-        build_targets=False,
     )
-    should_shuffle = shuffle if shuffle is not None else split == "train"
+    should_shuffle = shuffle if shuffle is not None else split in ("train", "all")
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -75,29 +76,46 @@ def create_memmap_data_loaders(
     }
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="NPY memmap dataloader preview")
-    parser.add_argument("--dataset-root", type=str, required=True, help="Path to the NPY memmap dataset directory")
-    parser.add_argument("--preview", action="store_true", help="Load one sample from each split and print its shapes")
-    return parser.parse_args()
+def create_few_shot_data_loader(
+    data_dir: str | Path,
+    target_envs: tuple[str, ...],
+    few_shot_subjects: int,
+    few_shot_frames: int,
+    batch_size: int,
+    num_workers: int = 0,
+    seed: int = 42,
+) -> tuple[DataLoader, DataLoader, list[int]]:
+    full_dataset = MemmapDataset(
+        data_dir=data_dir,
+        split="all",
+        envs=target_envs,
+        seed=seed,
+    )
+    train_indices = full_dataset._sample_few_shot(
+        few_shot_subjects=few_shot_subjects,
+        few_shot_frames=few_shot_frames,
+    )
+    train_dataset = Subset(full_dataset, train_indices)
+    all_indices = list(range(len(full_dataset)))
+    val_indices = [i for i in all_indices if i not in set(train_indices)]
 
-
-def main() -> None:
-    args = parse_args()
-    data_dir = Path(args.dataset_root)
-    if not data_dir.is_dir():
-        raise FileNotFoundError(f"Dataset directory does not exist: {data_dir}")
-
-    for split in SPLIT_NAMES:
-        dataset = MemmapDataset(data_dir=data_dir, split=split, build_targets=False)
-        print(f"{split}: {len(dataset)} samples")
-
-    if args.preview:
-        for split in SPLIT_NAMES:
-            dataset = MemmapDataset(data_dir=data_dir, split=split, build_targets=False)
-            sample = dataset[0]
-            print(f"{split}_preview: csi={tuple(sample['csi'].shape)}, kpts18={tuple(sample['kpts18'].shape)}, meta={sample['meta']}")
-
-
-if __name__ == "__main__":
-    main()
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        collate_fn=memmap_collate_fn,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+    )
+    val_dataset = Subset(full_dataset, val_indices)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=memmap_collate_fn,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+    )
+    return train_loader, val_loader, train_indices
