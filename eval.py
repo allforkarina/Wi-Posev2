@@ -275,6 +275,10 @@ def parse_args() -> argparse.Namespace:
         "--target-env", default="env2",
         help="Target environment name for cross-env comparison (default: env2).",
     )
+    parser.add_argument(
+        "--eval-envs", nargs="+", default=None,
+        help="Filter evaluation to specific environments, e.g. --eval-envs env2 (default: all).",
+    )
     return parser.parse_args()
 
 
@@ -289,6 +293,7 @@ def main() -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         shuffle=False,
+        envs=args.eval_envs,
     )
 
     # --- single-pass evaluation ---

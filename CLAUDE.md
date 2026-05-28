@@ -92,6 +92,7 @@ python train.py --dataset-root data/mmfi_pose --mode source_only \
 # Phase 2: Baseline eval (source checkpoint on target domain)
 python eval.py --dataset-root data/mmfi_pose \
     --checkpoint outputs/train_source/best_val_mpjpe.pth \
+    --eval-envs env2 \
     --output-dir outputs/eval_baseline
 
 # Phase 3: Tier 1 fine-tune (few-shot target)

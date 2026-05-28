@@ -37,6 +37,7 @@ def create_memmap_data_loader(
     num_workers: int = 0,
     shuffle: Optional[bool] = None,
     seed: int = 42,
+    envs: Sequence[str] | None = None,
 ) -> DataLoader:
     if split not in SPLIT_NAMES:
         raise ValueError(f"split must be one of {SPLIT_NAMES}, got {split}")
@@ -46,6 +47,7 @@ def create_memmap_data_loader(
         split=split,
         seed=seed,
         build_targets=False,
+        envs=list(envs) if envs else None,
     )
     should_shuffle = shuffle if shuffle is not None else split == "train"
     return DataLoader(
