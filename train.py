@@ -5,7 +5,7 @@ import csv
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping
+from typing import Dict, Iterable, Mapping
 
 import torch
 import torch.nn.functional as F
@@ -16,7 +16,6 @@ from torch.utils.data import DataLoader, Subset
 
 from dataloader import create_memmap_data_loaders
 from models import AXIAL_ENCODER_MODES, DECODER_TYPES, OPENPOSE_BONE_EDGES, WiFlowModel
-from pose_targets import build_pcm_paf_targets
 
 
 PCK_THRESHOLDS: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5)
@@ -37,10 +36,6 @@ class TrainConfig:
     weight_decay: float = 5e-4
     grad_clip_norm: float = 1.0
     bone_loss_weight: float = 0.5
-    heatmap_size: int = 36
-    heatmap_sigma: float = 1.5
-    paf_width: float = 1.0
-    paf_loss_weight: float = 1.0
     num_workers: int = 4
     device: str = "cuda"
     seed: int = 42
@@ -73,51 +68,17 @@ def bone_length_loss(
     return F.l1_loss(pred_lengths, target_lengths)
 
 
-def extract_prediction_keypoints(prediction: Any) -> torch.Tensor:
-    if isinstance(prediction, Mapping):
-        keypoints = prediction.get("keypoints")
-        if not isinstance(keypoints, torch.Tensor):
-            raise ValueError("Heatmap decoder output must contain tensor keypoints")
-        return keypoints
+def extract_prediction_keypoints(prediction: torch.Tensor) -> torch.Tensor:
     if not isinstance(prediction, torch.Tensor):
         raise TypeError(f"Unexpected model prediction type: {type(prediction)!r}")
     return prediction
 
 
 def compute_losses(
-    prediction: Any,
+    prediction: torch.Tensor,
     target: torch.Tensor,
     bone_loss_weight: float = 0.5,
-    heatmap_size: int = 36,
-    heatmap_sigma: float = 1.5,
-    paf_width: float = 1.0,
-    paf_loss_weight: float = 1.0,
 ) -> Dict[str, torch.Tensor]:
-    zero = torch.zeros((), dtype=target.dtype, device=target.device)
-    if isinstance(prediction, Mapping):
-        stages = prediction.get("stages")
-        if not isinstance(stages, list) or not stages:
-            raise ValueError("Heatmap decoder output must contain non-empty stages")
-        pcm_gt, paf_gt = build_pcm_paf_targets(
-            target,
-            heatmap_size=heatmap_size,
-            sigma=heatmap_sigma,
-            paf_width=paf_width,
-        )
-        pcm_total = zero
-        paf_total = zero
-        for stage in stages:
-            pcm_total = pcm_total + F.mse_loss(stage["pcm"], pcm_gt)
-            paf_total = paf_total + F.mse_loss(stage["paf"], paf_gt)
-        total = pcm_total + paf_loss_weight * paf_total
-        return {
-            "loss": total,
-            "coord_loss": zero,
-            "bone_loss": zero,
-            "pcm_loss": pcm_total,
-            "paf_loss": paf_total,
-        }
-
     coord = F.l1_loss(prediction, target)
     bone = bone_length_loss(prediction, target)
     total = coord + bone_loss_weight * bone
@@ -125,8 +86,6 @@ def compute_losses(
         "loss": total,
         "coord_loss": coord,
         "bone_loss": bone,
-        "pcm_loss": zero,
-        "paf_loss": zero,
     }
 
 
@@ -185,10 +144,6 @@ def run_epoch(
                 prediction,
                 target,
                 bone_loss_weight=criterion_config.bone_loss_weight,
-                heatmap_size=criterion_config.heatmap_size,
-                heatmap_sigma=criterion_config.heatmap_sigma,
-                paf_width=criterion_config.paf_width,
-                paf_loss_weight=criterion_config.paf_loss_weight,
             )
             keypoint_prediction = extract_prediction_keypoints(prediction)
             metrics = compute_metrics(keypoint_prediction.detach(), target)
@@ -281,7 +236,6 @@ def run_training(config: TrainConfig) -> None:
         input_channels=3,
         axial_mode=config.axial_mode,
         decoder_type=config.decoder_type,
-        heatmap_size=config.heatmap_size,
     ).to(device)
     optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     scheduler = OneCycleLR(
@@ -333,22 +287,14 @@ def run_training(config: TrainConfig) -> None:
             "train_loss": train_metrics["loss"],
             "train_coord_loss": train_metrics["coord_loss"],
             "train_bone_loss": train_metrics["bone_loss"],
-            "train_pcm_loss": train_metrics["pcm_loss"],
-            "train_paf_loss": train_metrics["paf_loss"],
             "train_mpjpe": train_metrics["mpjpe"],
             "train_pck_0_2": train_metrics["pck_0_2"],
             "val_loss": val_metrics["loss"],
             "val_coord_loss": val_metrics["coord_loss"],
             "val_bone_loss": val_metrics["bone_loss"],
-            "val_pcm_loss": val_metrics["pcm_loss"],
-            "val_paf_loss": val_metrics["paf_loss"],
             "val_mpjpe": val_metrics["mpjpe"],
             "val_pck_0_2": val_metrics["pck_0_2"],
             "val_pck_0_5": val_metrics["pck_0_5"],
-            "heatmap_size": config.heatmap_size,
-            "heatmap_sigma": config.heatmap_sigma,
-            "paf_width": config.paf_width,
-            "paf_loss_weight": config.paf_loss_weight,
             "current_lr": current_lr,
             "epoch_time": epoch_time,
         }
