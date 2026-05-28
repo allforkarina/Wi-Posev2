@@ -1,6 +1,6 @@
 """Research-grade feature visualizations for WiFlow model evaluation.
 
-Generates 6 figures answering specific scientific questions about the model's
+Generates 5 figures answering specific scientific questions about the model's
 internal representations.  Requires ``--feature-viz`` flag on ``eval.py``.
 
 Figures
@@ -9,8 +9,7 @@ Figures
 2. Symmetric Downsampling Trajectory    — PCA of resblock outputs
 3. Axial Attention Maps                 — spatial + temporal attention weights
 4. Joint Query Trajectory               — t-SNE + cosine similarity across layers
-5. PCM/PAF Heatmap Quality              — radar chart + PAF direction consistency
-6. Feature-Pose Correlation Landscape   — Pearson r between encoder & joints
+5. Feature-Pose Correlation Landscape   — Pearson r between encoder & joints
 """
 
 from __future__ import annotations
@@ -634,134 +633,6 @@ def _fig4_joint_query_trajectory(
 
 
 # ---------------------------------------------------------------------------
-# Figure 5a: PCM Peak Response Radar
-# ---------------------------------------------------------------------------
-
-
-def _fig5a_pcm_radar(
-    sample: dict[str, Any],
-    hook_ctx: Any,
-    output_dir: Path,
-) -> None:
-    """Polar radar chart: PCM peak response per joint across 3 stages."""
-    # For heatmap_msfn, the WiFlowMSFNDecoder returns list[dict[str, Tensor]]
-    stages_data = hook_ctx.get("decoder")
-    if stages_data is None or not isinstance(stages_data, list):
-        print(f"    [WARN] No decoder stage data for {sample['sample_id']}")
-        return
-    if not stages_data or not isinstance(stages_data[0], dict):
-        return
-
-    num_stages = len(stages_data)
-    peak_responses: list[np.ndarray] = []
-    for stage_dict in stages_data:
-        pcm = stage_dict["pcm"][0].cpu().numpy()  # [18, H, H]
-        peaks = np.array([pcm[j].max() for j in range(18)])
-        peak_responses.append(peaks)
-
-    angles = np.linspace(0, 2 * np.pi, 18, endpoint=False).tolist()
-    angles += angles[:1]
-
-    fig = plt.figure(figsize=(10, 10))
-    ax = fig.add_subplot(1, 1, 1, projection="polar")
-
-    stage_colors = ["#B5D4F4", "#378ADD", "#0C447C"]
-    stage_styles = ["--", "-.", "-"]
-    for s, peaks in enumerate(peak_responses[:3]):
-        vals = peaks.tolist() + peaks[:1].tolist()
-        ax.plot(angles, vals, stage_styles[s], color=stage_colors[s],
-                linewidth=1.5, markersize=4, label=f"Stage {s + 1}")
-        ax.fill(angles, vals, alpha=0.1, color=stage_colors[s])
-
-    ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(_JOINT_NAMES, fontsize=8)
-    ax.set_title("PCM peak response per joint across stages", fontsize=14, fontweight="bold")
-    ax.legend(loc="lower right", fontsize=9)
-
-    _save_fig(fig, output_dir / "fig5a_pcm_radar")
-
-
-# ---------------------------------------------------------------------------
-# Figure 5b: PAF Direction Consistency (skeleton heatmap)
-# ---------------------------------------------------------------------------
-
-
-def _fig5b_paf_direction_consistency(
-    sample: dict[str, Any],
-    hook_ctx: Any,
-    output_dir: Path,
-) -> None:
-    """Skeleton overlay with PAF direction cosine similarity at sampled points."""
-    stages_data = hook_ctx.get("decoder")
-    if stages_data is None or not isinstance(stages_data, list):
-        return
-    if not stages_data or not isinstance(stages_data[0], dict):
-        return
-
-    # Use last stage PAF
-    last_paf = stages_data[-1]["paf"][0].cpu().numpy()  # [2*B, H, H]
-
-    # Use GT keypoints to define skeleton positions in a canonical layout
-    gt = sample["target"][0].cpu().numpy()  # [18, 2]
-    # Normalized coords: map to figure space [0, 1]
-    gt_norm = gt.copy()
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_facecolor("#F5F5F5")
-
-    # Draw skeleton background
-    for start, end in OPENPOSE_BONE_EDGES:
-        ax.plot(
-            [gt_norm[start, 0], gt_norm[end, 0]],
-            [gt_norm[start, 1], gt_norm[end, 1]],
-            color="#CCCCCC", linewidth=1.0,
-        )
-
-    # Sample points along each bone and compute predicted direction consistency
-    num_pts_per_bone = 5
-    heatmap_h = last_paf.shape[1]
-
-    for bone_idx, (start, end) in enumerate(OPENPOSE_BONE_EDGES):
-        # GT direction in normalized space
-        gt_dir = gt[end] - gt[start]
-        gt_len = np.linalg.norm(gt_dir) + 1e-8
-        gt_unit = gt_dir / gt_len
-
-        # PAF channels: 2 per bone (x, y components)
-        paf_x = last_paf[bone_idx * 2]
-        paf_y = last_paf[bone_idx * 2 + 1]
-
-        for t in np.linspace(0, 1, num_pts_per_bone):
-            pos = gt[start] + t * gt_dir  # normalized [0, 1] coords
-            # Map to heatmap indices
-            hx = int(np.clip(pos[0] * (heatmap_h - 1), 0, heatmap_h - 1))
-            hy = int(np.clip(pos[1] * (heatmap_h - 1), 0, heatmap_h - 1))
-            pred_x = paf_x[hy, hx]
-            pred_y = paf_y[hy, hx]
-            pred_vec = np.array([pred_x, pred_y])
-            pred_len = np.linalg.norm(pred_vec) + 1e-8
-            pred_unit = pred_vec / pred_len
-            cos_sim = float(np.clip(np.dot(gt_unit, pred_unit), 0.0, 1.0))
-
-            ax.scatter(pos[0], pos[1], c=[cos_sim], cmap="RdYlGn",
-                       vmin=0, vmax=1, s=120, edgecolors="white", linewidths=0.5)
-
-    ax.set_xlim(-0.05, 1.05)
-    ax.set_ylim(1.05, -0.05)  # invert y for top-down pose view
-    ax.set_aspect("equal")
-    ax.axis("off")
-    ax.set_title("PAF direction consistency per limb", fontsize=14, fontweight="bold")
-
-    # colorbar
-    sm = plt.cm.ScalarMappable(cmap="RdYlGn", norm=plt.Normalize(0, 1))
-    sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.02)
-    cbar.set_label("PAF cosine similarity", fontsize=8)
-
-    _save_fig(fig, output_dir / "fig5b_paf_direction")
-
-
-# ---------------------------------------------------------------------------
 # Figure 6: Feature-Pose Correlation Landscape (global)
 # ---------------------------------------------------------------------------
 
@@ -929,14 +800,9 @@ def _build_overview(
         "fig1_antenna_channel",
         "fig2_downsampling_trajectory",
         "fig3_axial_attention",
+        "fig4_joint_query_trajectory",
+        "fig6_feature_pose_correlation",
     ]
-    if decoder_type in ("joint", "hierarchical"):
-        fig_names.append("fig4_joint_query_trajectory")
-        fig_names.append("fig6_feature_pose_correlation")
-    else:
-        fig_names.append("fig5a_pcm_radar")
-        fig_names.append("fig5b_paf_direction")
-        fig_names.append("fig6_feature_pose_correlation")
 
     # Collect thumbnail paths
     thumb_paths: list[Path | None] = []
@@ -1127,7 +993,7 @@ def run_feature_visualization(
         Base output directory; ``feature_viz/`` is created underneath.
     device : torch.device
     decoder_type : str
-        One of ``"joint"``, ``"hierarchical"``, ``"heatmap_msfn"``.
+        One of ``"joint"``, ``"hierarchical"``.
     num_action_samples : int
         Samples per action type (default 3).
     batch_size : int
@@ -1182,7 +1048,7 @@ def run_feature_visualization(
             "decoder.stages.2",
         ]
     else:
-        decoder_hooks = ["decoder"]
+        raise ValueError(f"Unknown decoder_type: {decoder_type}")
 
     all_hooks = common_hook_points + decoder_hooks
 
@@ -1213,11 +1079,6 @@ def run_feature_visualization(
             # Fig 4: Joint Query Trajectory (joint / hierarchical only)
             if decoder_type in ("joint", "hierarchical"):
                 _fig4_joint_query_trajectory(sample, ctx, sample_dir)
-
-            # Fig 5: Heatmap Quality (heatmap_msfn only)
-            if decoder_type == "heatmap_msfn":
-                _fig5a_pcm_radar(sample, ctx, sample_dir)
-                _fig5b_paf_direction_consistency(sample, ctx, sample_dir)
 
     # --- Per-action composites ---
     print("  Building per-action composite figures...")
