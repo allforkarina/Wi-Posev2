@@ -1,13 +1,13 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `dataloader.py`: Core module for loading NPY memmap datasets, creating PyTorch `DataLoader` instances with `memmap_collate_fn`, and providing `create_memmap_data_loader` / `create_memmap_data_loaders` factory functions.
+- `dataloader.py`: Core module for loading NPY memmap datasets, creating PyTorch `DataLoader` instances with `memmap_collate_fn`, and providing `create_memmap_data_loader` / `create_memmap_data_loaders` / `create_few_shot_data_loader` factory functions.
 - `data/memmap_dataset.py`: NPY memmap dataset reader that loads CSI amplitude, OpenPose18 keypoints, and metadata from `.npy`/`.npz` files with zero-copy OS-cached I/O.
 - `data/heatmap_gt.py`: OpenPose18 coordinate conversion utilities (coco17_to_openpose18, valid_point).
 - `pose_targets.py`: Reserved for future pose target utilities.
 - `models/`: PyTorch model code, including the full WiFlow model, CSI spatial encoder with symmetric spatio-temporal downsampling, axial attention encoder, multi-layer joint cross-attention decoder, hierarchical joint decoder ablation, and shared OpenPose18 skeleton topology. The active single-frame model path is CSI amplitude input -> spatial encoder with antenna mixing, feature stem, and symmetric time-frequency residual blocks -> axial encoder -> the configured decoder.
-- `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and CSV logging.
-- `eval.py`: Root-level evaluation entrypoint for loading checkpoints, computing test metrics, and optionally generating research-grade feature visualizations via `--feature-viz`.
+- `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and CSV logging. Supports `--mode source_only` (single-domain training) and `--mode finetune` (cross-domain few-shot finetuning with Tier 1 freeze).
+- `eval.py`: Root-level evaluation entrypoint for loading checkpoints, computing test metrics, and optionally generating research-grade feature visualizations via `--feature-viz`. Supports `--eval-envs` (environment filtering) and `--exclude-indices` (exclude few-shot training frames).
 - `evaluation/`: Evaluation pipeline package.
   - `evaluation/hooks.py`: Forward hook context manager (`WiFlowHookContext`, `wiflow_hooks`) for non-invasive intermediate feature extraction from WiFlow submodules.
   - `evaluation/feature_viz.py`: Orchestrator and figure-drawing functions for research-grade feature visualization (antenna channel response, resblock PCA trajectory, axial attention maps, joint query t-SNE, feature-pose correlation).
@@ -112,12 +112,74 @@ This checkout has no `.git` history, so no convention can be inferred. Use conci
 ## Security & Configuration Tips
 Do not hard-code private dataset locations beyond documented defaults. Pass dataset paths with `--dataset-root` and keep large or sensitive data outside version control.
 
+## Code Modification Constraints (Karpathy Guidelines)
+
+Behavioral guidelines to reduce common LLM coding mistakes, derived from Andrej Karpathy's observations on LLM coding pitfalls.
+
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+
+### 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+### 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+### 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+### 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
 ## Agent-Specific Instructions
 Write repository-facing agent notes, documentation, and code comments in English. Keep comments neatly aligned with surrounding style. Use Chinese for conversational replies unless the user requests another language.
 
-Whenever project code changes, update this `AGENTS.md` file in the same turn if the change affects commands, structure, conventions, testing, configuration, or agent workflow.
-
 After each project modification, commit the change and push it to the configured GitHub remote in the same turn unless the user explicitly asks not to push.
+
+Whenever the project undergoes significant modifications (architecture changes, new CLI arguments, new training modes, or modified workflows), update this `CLAUDE.md` file in the same turn to keep training/evaluation commands and module descriptions accurate.
 
 Before changing code, apply the `karpathy-guidelines` skill: state assumptions when needed, prefer the smallest working change, avoid unrelated refactors, and verify the result with a concrete check.
 
