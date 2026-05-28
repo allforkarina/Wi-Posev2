@@ -5,27 +5,6 @@ from typing import Iterable, Tuple
 import numpy as np
 
 
-OPENPOSE_18_NAMES = [
-    "nose",
-    "neck",
-    "r_shoulder",
-    "r_elbow",
-    "r_wrist",
-    "l_shoulder",
-    "l_elbow",
-    "l_wrist",
-    "r_hip",
-    "r_knee",
-    "r_ankle",
-    "l_hip",
-    "l_knee",
-    "l_ankle",
-    "r_eye",
-    "l_eye",
-    "r_ear",
-    "l_ear",
-]
-
 COCO17_TO_OPENPOSE18 = {
     0: 0,
     2: 6,
@@ -116,19 +95,6 @@ def pose_to_heatmap_coords(
     kpts = (kpts - lo) * scale
     if clip:
         kpts = np.clip(kpts, 0, size - 1)
-    kpts[invalid] = 0.0
-    return kpts.astype(np.float32)
-
-
-def heatmap_to_pose_coords(
-    kpts: np.ndarray,
-    size: int = 36,
-    pose_range: Tuple[float, float] = (-0.8, 0.8),
-) -> np.ndarray:
-    kpts = np.asarray(kpts, dtype=np.float32).copy()
-    lo, hi = pose_range
-    invalid = ~np.isfinite(kpts).all(axis=-1) | np.all(np.isclose(kpts, 0.0), axis=-1)
-    kpts = kpts / max(size - 1, 1) * (hi - lo) + lo
     kpts[invalid] = 0.0
     return kpts.astype(np.float32)
 

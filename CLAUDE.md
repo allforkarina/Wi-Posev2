@@ -89,18 +89,25 @@ python train.py --dataset-root data/mmfi_pose --mode source_only \
     --source-envs env1 --epochs 50 --batch-size 128 \
     --output-dir outputs/train_source
 
-# Phase 2: Baseline eval (source checkpoint on target domain)
+# Phase 2: Baseline eval (source checkpoint on ALL target domain data)
 python eval.py --dataset-root data/mmfi_pose \
     --checkpoint outputs/train_source/best_val_mpjpe.pth \
-    --eval-envs env2 \
+    --eval-split all --eval-envs env2 \
     --output-dir outputs/eval_baseline
 
-# Phase 3: Tier 1 fine-tune (few-shot target)
+# Phase 3: Tier 1 fine-tune (few-shot target, no val, saves every epoch)
 python train.py --dataset-root data/mmfi_pose --mode finetune \
     --finetune-from outputs/train_source/best_val_mpjpe.pth \
     --target-envs env2 --few-shot-frames 5 --few-shot-subjects 4 \
     --freeze-tier 1 --epochs 30 --batch-size 128 --finetune-lr 1e-5 \
     --output-dir outputs/finetune_tier1
+
+# Phase 3 eval: evaluate finetuned model excluding few-shot train samples
+python eval.py --dataset-root data/mmfi_pose \
+    --checkpoint outputs/finetune_tier1/epoch_030.pth \
+    --eval-split all --eval-envs env2 \
+    --exclude-indices outputs/finetune_tier1/few_shot_train_indices.npy \
+    --output-dir outputs/eval_finetune_tier1
 
 # Evaluate a checkpoint
 python eval.py --dataset-root data/mmfi_pose --checkpoint outputs/train/best_val_mpjpe.pth --output-dir outputs/eval

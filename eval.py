@@ -8,6 +8,7 @@ import csv
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -279,6 +280,14 @@ def parse_args() -> argparse.Namespace:
         "--eval-envs", nargs="+", default=None,
         help="Filter evaluation to specific environments, e.g. --eval-envs env2 (default: all).",
     )
+    parser.add_argument(
+        "--eval-split", default="test", choices=["train", "val", "test", "all"],
+        help="Dataset split to evaluate on (default: test). Use 'all' for full-domain eval.",
+    )
+    parser.add_argument(
+        "--exclude-indices", default=None,
+        help="Path to .npy file with frame indices to exclude from evaluation.",
+    )
     return parser.parse_args()
 
 
@@ -289,12 +298,24 @@ def main() -> None:
 
     test_loader = create_memmap_data_loader(
         data_dir=args.dataset_root,
-        split="test",
+        split=args.eval_split,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         shuffle=False,
         envs=args.eval_envs,
     )
+
+    if args.exclude_indices is not None:
+        exclude_path = Path(args.exclude_indices)
+        if not exclude_path.exists():
+            raise FileNotFoundError(f"Exclude indices file not found: {exclude_path}")
+        exclude_set = set(np.load(str(exclude_path)).astype(int).tolist())
+        before = len(test_loader.dataset.indices)
+        test_loader.dataset.indices = np.asarray(sorted(
+            [i for i in test_loader.dataset.indices if int(i) not in exclude_set]
+        ), dtype=np.int64)
+        print(f"Excluded {before - len(test_loader.dataset.indices)} few-shot train samples, "
+              f"{len(test_loader.dataset.indices)} remaining for evaluation.")
 
     # --- single-pass evaluation ---
     result = run_evaluation(model, test_loader, device)

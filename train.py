@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -288,14 +289,18 @@ def run_da_epoch(
 
                 # Supervised losses
                 losses_s = compute_losses(
-                    y_s,
-                    kp_s_gt,
+                    y_s, kp_s_gt,
                     bone_loss_weight=criterion_config.bone_loss_weight,
+                    heatmap_sigma=criterion_config.heatmap_sigma,
+                    paf_width=criterion_config.paf_width,
+                    paf_loss_weight=criterion_config.paf_loss_weight,
                 )
                 losses_t = compute_losses(
-                    y_t,
-                    kp_t_gt,
+                    y_t, kp_t_gt,
                     bone_loss_weight=criterion_config.bone_loss_weight,
+                    heatmap_sigma=criterion_config.heatmap_sigma,
+                    paf_width=criterion_config.paf_width,
+                    paf_loss_weight=criterion_config.paf_loss_weight,
                 )
 
                 # ICAL loss
@@ -394,9 +399,11 @@ def run_val_epoch(
             model_input, target = prepare_model_input(batch, device)
             prediction = model(model_input)
             losses = compute_losses(
-                prediction,
-                target,
+                prediction, target,
                 bone_loss_weight=criterion_config.bone_loss_weight,
+                heatmap_sigma=criterion_config.heatmap_sigma,
+                paf_width=criterion_config.paf_width,
+                paf_loss_weight=criterion_config.paf_loss_weight,
             )
             keypoint_prediction = extract_prediction_keypoints(prediction)
             metrics = compute_metrics(keypoint_prediction, target)
@@ -435,6 +442,9 @@ def run_single_domain_epoch(
                 losses = compute_losses(
                     prediction, target,
                     bone_loss_weight=criterion_config.bone_loss_weight,
+                    heatmap_sigma=criterion_config.heatmap_sigma,
+                    paf_width=criterion_config.paf_width,
+                    paf_loss_weight=criterion_config.paf_loss_weight,
                 )
 
             if is_training:
@@ -568,7 +578,7 @@ def _setup_loaders_source_only(config: TrainConfig) -> tuple[DataLoader, DataLoa
 
 def _setup_finetune(
     config: TrainConfig, device: torch.device,
-) -> tuple[WiFlowModel, DataLoader, DataLoader]:
+) -> tuple[WiFlowModel, DataLoader, DataLoader, np.ndarray]:
     from dataloader import create_few_shot_data_loader
 
     model = WiFlowModel(
@@ -595,7 +605,7 @@ def _setup_finetune(
     )
     print(f"Few-shot target: {len(loaders['train'].dataset)} train / "
           f"{len(loaders['val'].dataset)} val samples")
-    return model, loaders["train"], loaders["val"]
+    return model, loaders["train"], loaders["val"], loaders["train_indices"]
 
 
 def run_training(config: TrainConfig) -> None:
@@ -618,12 +628,15 @@ def run_training(config: TrainConfig) -> None:
         lr = config.lr
 
     elif config.mode == "finetune":
-        model, train_loader, val_loader = _setup_finetune(config, device)
+        model, train_loader, val_loader, fs_indices = _setup_finetune(config, device)
         train_loader_for_epoch = train_loader
         val_loader_for_epoch = val_loader
         da_mode = False
         steps_per_epoch = len(train_loader)
         lr = config.finetune_lr
+        np.save(str(output_dir / "few_shot_train_indices.npy"), fs_indices)
+        print(f"Saved few-shot train indices ({len(fs_indices)} frames) to "
+              f"{output_dir / 'few_shot_train_indices.npy'}")
 
     else:  # da
         loaders = create_da_data_loaders(
@@ -673,6 +686,7 @@ def run_training(config: TrainConfig) -> None:
             f"Model output shape {tuple(keypoint_output.shape)} does not match label shape {tuple(target.shape)}"
         )
 
+    finetune_mode = config.mode == "finetune"
     best_val_mpjpe = float("inf")
     best_val_pck_0_2 = -float("inf")
     patience_counter = 0
@@ -696,6 +710,35 @@ def run_training(config: TrainConfig) -> None:
 
         current_lr = optimizer.param_groups[0]["lr"]
         epoch_time = time.perf_counter() - start_time
+
+        if finetune_mode:
+            # Save checkpoint every epoch (no val during finetune)
+            save_checkpoint(
+                output_dir / f"epoch_{epoch:03d}.pth",
+                model, optimizer, scheduler, epoch,
+                best_metric=train_metrics["loss"], config=config,
+            )
+            save_checkpoint(
+                output_dir / "last.pth",
+                model, optimizer, scheduler, epoch,
+                best_metric=train_metrics["loss"], config=config,
+            )
+            row = {
+                "epoch": epoch, "mode": config.mode,
+                "axial_mode": config.axial_mode,
+                "decoder_type": config.decoder_type,
+                "train_loss": train_metrics["loss"],
+                "train_coord_loss": train_metrics["coord_loss"],
+                "train_bone_loss": train_metrics["bone_loss"],
+                "train_mpjpe": train_metrics["mpjpe"],
+                "train_pck_0_2": train_metrics["pck_0_2"],
+                "current_lr": current_lr,
+                "epoch_time": epoch_time,
+            }
+            append_csv_row(log_path, row)
+            print(f"epoch={epoch:03d} loss={train_metrics['loss']:.6f} "
+                  f"lr={current_lr:.2e} epoch_time={epoch_time:.1f}s")
+            continue
 
         do_val = epoch % config.val_every == 0 or epoch == config.epochs
         if do_val:
