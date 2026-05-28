@@ -84,6 +84,23 @@ python train.py --dataset-root data/mmfi_pose --decoder-type hierarchical --epoc
 # Quick sanity check
 python train.py --dataset-root data/mmfi_pose --epochs 2 --batch-size 4 --output-dir outputs/sanity
 
+# Phase 1: Source-only training
+python train.py --dataset-root data/mmfi_pose --mode source_only \
+    --source-envs env1 --epochs 50 --batch-size 128 \
+    --output-dir outputs/train_source
+
+# Phase 2: Baseline eval (source checkpoint on target domain)
+python eval.py --dataset-root data/mmfi_pose \
+    --checkpoint outputs/train_source/best_val_mpjpe.pth \
+    --output-dir outputs/eval_baseline
+
+# Phase 3: Tier 1 fine-tune (few-shot target)
+python train.py --dataset-root data/mmfi_pose --mode finetune \
+    --finetune-from outputs/train_source/best_val_mpjpe.pth \
+    --target-envs env2 --few-shot-frames 5 --few-shot-subjects 4 \
+    --freeze-tier 1 --epochs 30 --batch-size 128 --finetune-lr 1e-5 \
+    --output-dir outputs/finetune_tier1
+
 # Evaluate a checkpoint
 python eval.py --dataset-root data/mmfi_pose --checkpoint outputs/train/best_val_mpjpe.pth --output-dir outputs/eval
 
