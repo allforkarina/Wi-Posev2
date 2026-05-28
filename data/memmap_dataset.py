@@ -8,8 +8,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from data.heatmap_gt import build_pcm_paf
-
 
 CSI_FILES = {
     "global_minmax": "csi_gminmax.npy",
@@ -37,24 +35,12 @@ class MemmapDataset(Dataset):
         test_subjects: Iterable[str] | None = None,
         random_val_ratio: float = 0.2,
         seed: int = 42,
-        time_packets: int = 64,
-        subcarrier_mode: str = "keep",
         normalize: str = "global_minmax",
-        heatmap_size: int = 36,
-        heatmap_sigma: float = 1.5,
-        paf_width: float = 1.0,
-        pose_range: tuple[float, float] = (-0.8, 0.8),
-        build_targets: bool = True,
     ) -> None:
         if split not in {"train", "val", "test", "all"}:
             raise ValueError(f"split must be train/val/test/all, got {split}")
         self.split = split
         self.normalize = normalize
-        self.heatmap_size = heatmap_size
-        self.heatmap_sigma = heatmap_sigma
-        self.paf_width = paf_width
-        self.pose_range = pose_range
-        self.build_targets = build_targets
 
         data_dir = Path(data_dir)
 
@@ -120,6 +106,35 @@ class MemmapDataset(Dataset):
 
         return np.asarray(sorted(candidate_indices), dtype=np.int64)
 
+    def _sample_few_shot(
+        self,
+        few_shot_subjects: int,
+        few_shot_frames: int,
+    ) -> list[int]:
+        action_list = [str(a) for a in self._actions]
+        sample_list = [str(s) for s in self._samples]
+
+        unique_subjects = sorted(set(sample_list))
+        selected_subjects = unique_subjects[:few_shot_subjects]
+
+        selected_indices: list[int] = []
+        for subject in selected_subjects:
+            for action in sorted(set(action_list)):
+                group = [
+                    i for i in range(len(self._actions))
+                    if sample_list[i] == subject and action_list[i] == action
+                ]
+                if not group:
+                    continue
+                group.sort()
+                if len(group) <= few_shot_frames:
+                    selected_indices.extend(group)
+                else:
+                    sampled = np.linspace(0, len(group) - 1, few_shot_frames, dtype=int)
+                    selected_indices.extend([group[s] for s in sampled])
+
+        return sorted(selected_indices)
+
     def __len__(self) -> int:
         return len(self.indices)
 
@@ -139,14 +154,4 @@ class MemmapDataset(Dataset):
                 "frame_idx": int(frame_idx),
             },
         }
-        if self.build_targets:
-            pcm, paf = build_pcm_paf(
-                kpts18,
-                size=self.heatmap_size,
-                sigma=self.heatmap_sigma,
-                paf_width=self.paf_width,
-                pose_range=self.pose_range,
-            )
-            item["pcm"] = torch.from_numpy(pcm)
-            item["paf"] = torch.from_numpy(paf)
         return item
