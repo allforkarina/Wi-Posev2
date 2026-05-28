@@ -46,7 +46,6 @@ def create_memmap_data_loader(
         data_dir=data_dir,
         split=split,
         seed=seed,
-        build_targets=False,
         envs=list(envs) if envs else None,
     )
     should_shuffle = shuffle if shuffle is not None else split == "train"
@@ -100,7 +99,6 @@ def create_da_data_loaders(
         split="all",
         envs=list(source_envs),
         seed=seed,
-        build_targets=False,
     )
     source_loader = DataLoader(
         source_dataset,
@@ -122,7 +120,6 @@ def create_da_data_loaders(
             split=split,
             envs=list(target_envs),
             seed=seed,
-            build_targets=False,
         )
         should_shuffle = split == "train"
         target_loaders[f"target_{split}"] = DataLoader(
@@ -159,7 +156,7 @@ def create_few_shot_data_loader(
     """
     full_dataset = MemmapDataset(
         data_dir=data_dir, split="all", envs=list(envs),
-        seed=seed, build_targets=False,
+        seed=seed,
         few_shot_frames=few_shot_frames, few_shot_subjects=few_shot_subjects,
     )
 
@@ -175,7 +172,7 @@ def create_few_shot_data_loader(
     def _make_dataset(_subjects: set[str]) -> MemmapDataset:
         ds = MemmapDataset(
             data_dir=data_dir, split="all", envs=list(envs),
-            seed=seed, build_targets=False,
+            seed=seed,
             few_shot_frames=few_shot_frames,
             few_shot_subjects=few_shot_subjects,
         )
@@ -215,12 +212,12 @@ def main() -> None:
         raise FileNotFoundError(f"Dataset directory does not exist: {data_dir}")
 
     for split in SPLIT_NAMES:
-        dataset = MemmapDataset(data_dir=data_dir, split=split, build_targets=False)
+        dataset = MemmapDataset(data_dir=data_dir, split=split)
         print(f"{split}: {len(dataset)} samples")
 
     if args.preview:
         for split in SPLIT_NAMES:
-            dataset = MemmapDataset(data_dir=data_dir, split=split, build_targets=False)
+            dataset = MemmapDataset(data_dir=data_dir, split=split)
             sample = dataset[0]
             print(f"{split}_preview: csi={tuple(sample['csi'].shape)}, kpts18={tuple(sample['kpts18'].shape)}, meta={sample['meta']}")
 

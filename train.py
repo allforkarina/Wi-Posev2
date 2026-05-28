@@ -548,12 +548,10 @@ def _setup_loaders_source_only(config: TrainConfig) -> tuple[DataLoader, DataLoa
     train_dataset = MemmapDataset(
         data_dir=config.dataset_root, split="train",
         envs=list(config.source_envs), seed=config.seed,
-        build_targets=False,
     )
     val_dataset = MemmapDataset(
         data_dir=config.dataset_root, split="val",
         envs=list(config.source_envs), seed=config.seed,
-        build_targets=False,
     )
     train_loader = DataLoader(
         train_dataset, batch_size=config.batch_size, shuffle=True,
