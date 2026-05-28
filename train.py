@@ -14,7 +14,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LRScheduler, OneCycleLR
 from torch.utils.data import DataLoader
 
-from dataloader import create_da_data_loaders
+from dataloader import create_da_data_loaders, memmap_collate_fn
 from models import AXIAL_ENCODER_MODES, CECEModule, DECODER_TYPES, OPENPOSE_BONE_EDGES, WiFlowModel
 from pose_targets import build_pcm_paf_targets
 
@@ -57,6 +57,13 @@ class TrainConfig:
     amp: bool = True
     early_stopping_patience: int = 5
     val_every: int = 1
+    # Mode
+    mode: str = "da"              # "source_only" | "da" | "finetune"
+    few_shot_frames: int = 0
+    few_shot_subjects: int = 0
+    finetune_from: str = ""
+    finetune_lr: float = 1e-5
+    freeze_tier: int = 1
 
 
 def prepare_model_input(
@@ -402,6 +409,100 @@ def run_val_epoch(
     return average_meter_totals(totals, sample_count)
 
 
+def run_single_domain_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion_config: TrainConfig,
+    device: torch.device,
+    optimizer: AdamW | None = None,
+    scheduler: LRScheduler | None = None,
+    scaler: torch.cuda.amp.GradScaler | None = None,
+) -> Dict[str, float]:
+    is_training = optimizer is not None
+    model.train(is_training)
+    use_amp = scaler is not None
+
+    totals: Dict[str, float] = {}
+    sample_count = 0
+
+    for batch in loader:
+        model_input, target = prepare_model_input(batch, device)
+        bs = target.shape[0]
+
+        with torch.set_grad_enabled(is_training):
+            with torch.amp.autocast(device.type, enabled=use_amp):
+                prediction = model(model_input)
+                losses = compute_losses(
+                    prediction, target,
+                    bone_loss_weight=criterion_config.bone_loss_weight,
+                )
+
+            if is_training:
+                optimizer.zero_grad(set_to_none=True)
+                if use_amp:
+                    scaler.scale(losses["loss"]).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), max_norm=criterion_config.grad_clip_norm,
+                    )
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    losses["loss"].backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), max_norm=criterion_config.grad_clip_norm,
+                    )
+                    optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+
+        kp_pred = extract_prediction_keypoints(prediction).detach()
+        metrics = compute_metrics(kp_pred, target)
+
+        sample_count += bs
+        for name, value in {**losses, **metrics}.items():
+            totals[name] = totals.get(name, 0.0) + float(value.detach().cpu()) * bs
+
+    return average_meter_totals(totals, sample_count)
+
+
+def apply_finetune_tier(model: nn.Module, tier: int = 1) -> None:
+    """Freeze parameters according to tier level.
+
+    Tier 0: freeze nothing (all trainable).
+    Tier 1: freeze Conv + MHA + FFN weights. Keep BN/LN affine,
+            joint_queries, and coordinate_head trainable.
+    """
+    if tier == 0:
+        return
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    KEEP_PATTERNS = [
+        "norm",             # LayerNorm
+        "attention_norm",   # LayerNorm in decoder attention
+        "joint_queries",    # learnable query vectors
+        "coordinate_head",  # decoder output MLP
+    ]
+
+    for name, module in model.named_modules():
+        keep = any(pat in name for pat in KEEP_PATTERNS)
+        if keep:
+            for p in module.parameters():
+                p.requires_grad = True
+
+    for _name, module in model.named_modules():
+        if isinstance(module, (nn.BatchNorm2d,)):
+            for p in module.parameters():
+                p.requires_grad = True
+
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    print(f"Finetune Tier {tier}: {trainable:,} / {total:,} params trainable "
+          f"({100 * trainable / total:.1f}%)")
+
+
 def save_checkpoint(
     path: Path,
     model: nn.Module,
@@ -441,50 +542,125 @@ def select_device(device_name: str) -> torch.device:
     return torch.device(device_name)
 
 
+def _setup_loaders_source_only(config: TrainConfig) -> tuple[DataLoader, DataLoader]:
+    from data.memmap_dataset import MemmapDataset
+
+    train_dataset = MemmapDataset(
+        data_dir=config.dataset_root, split="train",
+        envs=list(config.source_envs), seed=config.seed,
+        build_targets=False,
+    )
+    val_dataset = MemmapDataset(
+        data_dir=config.dataset_root, split="val",
+        envs=list(config.source_envs), seed=config.seed,
+        build_targets=False,
+    )
+    train_loader = DataLoader(
+        train_dataset, batch_size=config.batch_size, shuffle=True,
+        num_workers=config.num_workers, collate_fn=memmap_collate_fn,
+        pin_memory=True, persistent_workers=config.num_workers > 0,
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=config.batch_size, shuffle=False,
+        num_workers=config.num_workers, collate_fn=memmap_collate_fn,
+        pin_memory=True, persistent_workers=config.num_workers > 0,
+    )
+    return train_loader, val_loader
+
+
+def _setup_finetune(
+    config: TrainConfig, device: torch.device,
+) -> tuple[WiFlowModel, DataLoader, DataLoader]:
+    from dataloader import create_few_shot_data_loader
+
+    model = WiFlowModel(
+        input_channels=3, axial_mode=config.axial_mode,
+        decoder_type=config.decoder_type, heatmap_size=config.heatmap_size,
+        dropout=config.dropout,
+    ).to(device)
+
+    checkpoint = torch.load(config.finetune_from, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    print(f"Loaded checkpoint from {config.finetune_from} "
+          f"(epoch {checkpoint.get('epoch', '?')})")
+
+    apply_finetune_tier(model, tier=config.freeze_tier)
+
+    loaders = create_few_shot_data_loader(
+        data_dir=config.dataset_root,
+        envs=list(config.target_envs),
+        batch_size=config.batch_size,
+        few_shot_frames=config.few_shot_frames,
+        few_shot_subjects=config.few_shot_subjects,
+        num_workers=config.num_workers,
+        seed=config.seed,
+    )
+    print(f"Few-shot target: {len(loaders['train'].dataset)} train / "
+          f"{len(loaders['val'].dataset)} val samples")
+    return model, loaders["train"], loaders["val"]
+
+
 def run_training(config: TrainConfig) -> None:
     torch.manual_seed(config.seed)
     device = select_device(config.device)
     output_dir = Path(config.output_dir)
 
-    loaders = create_da_data_loaders(
-        data_dir=config.dataset_root,
-        source_envs=config.source_envs,
-        target_envs=config.target_envs,
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
-        seed=config.seed,
-    )
+    # --- Mode-specific setup ---
+    if config.mode == "source_only":
+        train_loader, val_loader = _setup_loaders_source_only(config)
+        train_loader_for_epoch: DataLoader = train_loader
+        val_loader_for_epoch: DataLoader = val_loader
+        model = WiFlowModel(
+            input_channels=3, axial_mode=config.axial_mode,
+            decoder_type=config.decoder_type, heatmap_size=config.heatmap_size,
+            dropout=config.dropout,
+        ).to(device)
+        da_mode = False
+        steps_per_epoch = len(train_loader)
+        lr = config.lr
 
-    source_train_loader = loaders["source_train"]
-    target_train_loader = loaders["target_train"]
-    target_val_loader = loaders["target_val"]
+    elif config.mode == "finetune":
+        model, train_loader, val_loader = _setup_finetune(config, device)
+        train_loader_for_epoch = train_loader
+        val_loader_for_epoch = val_loader
+        da_mode = False
+        steps_per_epoch = len(train_loader)
+        lr = config.finetune_lr
 
-    model = WiFlowModel(
-        input_channels=3,
-        axial_mode=config.axial_mode,
-        decoder_type=config.decoder_type,
-        heatmap_size=config.heatmap_size,
-        dropout=config.dropout,
-    ).to(device)
+    else:  # da
+        loaders = create_da_data_loaders(
+            data_dir=config.dataset_root,
+            source_envs=config.source_envs,
+            target_envs=config.target_envs,
+            batch_size=config.batch_size,
+            num_workers=config.num_workers,
+            seed=config.seed,
+        )
+        source_train_loader = loaders["source_train"]
+        train_loader_for_epoch = loaders["target_train"]
+        val_loader_for_epoch = loaders["target_val"]
+        model = WiFlowModel(
+            input_channels=3, axial_mode=config.axial_mode,
+            decoder_type=config.decoder_type, heatmap_size=config.heatmap_size,
+            dropout=config.dropout,
+        ).to(device)
+        cece = CECEModule(num_channels=256).to(device) if config.cece_enabled else None
+        da_mode = True
+        steps_per_epoch = len(train_loader_for_epoch)
+        lr = config.lr
 
-    cece = CECEModule(num_channels=256).to(device) if config.cece_enabled else None
-
-    optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=config.weight_decay)
     scheduler = OneCycleLR(
-        optimizer,
-        max_lr=config.max_lr,
-        epochs=config.epochs,
-        steps_per_epoch=len(target_train_loader),
-        pct_start=config.pct_start,
+        optimizer, max_lr=config.max_lr, epochs=config.epochs,
+        steps_per_epoch=steps_per_epoch, pct_start=config.pct_start,
         anneal_strategy="cos",
-        div_factor=config.max_lr / max(config.lr, 1e-8),
+        div_factor=config.max_lr / max(lr, 1e-8),
         final_div_factor=1000.0,
     )
-
     scaler = torch.amp.GradScaler(device.type, enabled=config.amp and device.type == "cuda")
 
     # Sanity check
-    first_batch = next(iter(target_train_loader))
+    first_batch = next(iter(train_loader_for_epoch))
     model_input, target = prepare_model_input(first_batch, device)
     with torch.no_grad():
         with torch.amp.autocast(device.type, enabled=scaler.is_enabled()):
@@ -505,28 +681,27 @@ def run_training(config: TrainConfig) -> None:
     log_path = output_dir / "train_log.csv"
     for epoch in range(1, config.epochs + 1):
         start_time = time.perf_counter()
-        train_metrics = run_da_epoch(
-            model=model,
-            cece=cece,
-            source_loader=source_train_loader,
-            target_loader=target_train_loader,
-            criterion_config=config,
-            device=device,
-            epoch=epoch,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            scaler=scaler,
-        )
+
+        if da_mode:
+            train_metrics = run_da_epoch(
+                model=model, cece=cece,
+                source_loader=source_train_loader,
+                target_loader=train_loader_for_epoch,
+                criterion_config=config, device=device, epoch=epoch,
+                optimizer=optimizer, scheduler=scheduler, scaler=scaler,
+            )
+        else:
+            train_metrics = run_single_domain_epoch(
+                model, train_loader_for_epoch, config, device,
+                optimizer=optimizer, scheduler=scheduler, scaler=scaler,
+            )
+
         current_lr = optimizer.param_groups[0]["lr"]
         epoch_time = time.perf_counter() - start_time
 
-        actual_alpha = config.alpha * min(
-            1.0, epoch / max(config.ical_warmup_epochs, 1)
-        )
-
         do_val = epoch % config.val_every == 0 or epoch == config.epochs
         if do_val:
-            val_metrics = run_val_epoch(model, target_val_loader, config, device)
+            val_metrics = run_val_epoch(model, val_loader_for_epoch, config, device)
             save_checkpoint(
                 output_dir / "last.pth",
                 model, optimizer, scheduler, epoch,
@@ -551,62 +726,84 @@ def run_training(config: TrainConfig) -> None:
                 )
         else:
             val_metrics = {}
-            patience_counter = 0  # only count val epochs for early stopping
 
-        row: Dict[str, float | int | str] = {
-            "epoch": epoch,
-            "axial_mode": config.axial_mode,
-            "decoder_type": config.decoder_type,
-            "train_source_loss": train_metrics["source_loss"],
-            "train_source_coord_loss": train_metrics["source_coord_loss"],
-            "train_source_bone_loss": train_metrics["source_bone_loss"],
-            "train_source_mpjpe": train_metrics["source_mpjpe"],
-            "train_source_pck_0_2": train_metrics["source_pck_0_2"],
-            "train_target_loss": train_metrics["target_loss"],
-            "train_target_coord_loss": train_metrics["target_coord_loss"],
-            "train_target_bone_loss": train_metrics["target_bone_loss"],
-            "train_target_mpjpe": train_metrics["target_mpjpe"],
-            "train_target_pck_0_2": train_metrics["target_pck_0_2"],
-            "train_ical": train_metrics["ical"],
-            "alpha": actual_alpha,
-            "val_loss": val_metrics.get("loss", ""),
-            "val_coord_loss": val_metrics.get("coord_loss", ""),
-            "val_bone_loss": val_metrics.get("bone_loss", ""),
-            "val_pcm_loss": val_metrics.get("pcm_loss", ""),
-            "val_paf_loss": val_metrics.get("paf_loss", ""),
-            "val_mpjpe": val_metrics.get("mpjpe", ""),
-            "val_pck_0_2": val_metrics.get("pck_0_2", ""),
-            "val_pck_0_5": val_metrics.get("pck_0_5", ""),
-            "heatmap_size": config.heatmap_size,
-            "heatmap_sigma": config.heatmap_sigma,
-            "paf_width": config.paf_width,
-            "paf_loss_weight": config.paf_loss_weight,
-            "current_lr": current_lr,
-            "epoch_time": epoch_time,
-        }
+        # Build log row — adapt key names to mode
+        if da_mode:
+            row: Dict[str, float | int | str] = {
+                "epoch": epoch,
+                "mode": config.mode,
+                "axial_mode": config.axial_mode,
+                "decoder_type": config.decoder_type,
+                "train_source_loss": train_metrics["source_loss"],
+                "train_source_mpjpe": train_metrics["source_mpjpe"],
+                "train_source_pck_0_2": train_metrics["source_pck_0_2"],
+                "train_target_loss": train_metrics["target_loss"],
+                "train_target_mpjpe": train_metrics["target_mpjpe"],
+                "train_target_pck_0_2": train_metrics["target_pck_0_2"],
+                "train_ical": train_metrics["ical"],
+                "val_mpjpe": val_metrics.get("mpjpe", ""),
+                "val_pck_0_2": val_metrics.get("pck_0_2", ""),
+                "current_lr": current_lr,
+                "epoch_time": epoch_time,
+            }
+        else:
+            row = {
+                "epoch": epoch,
+                "mode": config.mode,
+                "axial_mode": config.axial_mode,
+                "decoder_type": config.decoder_type,
+                "train_loss": train_metrics["loss"],
+                "train_coord_loss": train_metrics["coord_loss"],
+                "train_bone_loss": train_metrics["bone_loss"],
+                "train_mpjpe": train_metrics["mpjpe"],
+                "train_pck_0_2": train_metrics["pck_0_2"],
+                "val_mpjpe": val_metrics.get("mpjpe", ""),
+                "val_pck_0_2": val_metrics.get("pck_0_2", ""),
+                "current_lr": current_lr,
+                "epoch_time": epoch_time,
+            }
         append_csv_row(log_path, row)
 
         if do_val:
-            print(
-                f"epoch={epoch:03d} "
-                f"src_loss={train_metrics['source_loss']:.6f} "
-                f"tgt_loss={train_metrics['target_loss']:.6f} "
-                f"ical={train_metrics['ical']:.6f} "
-                f"val_mpjpe={val_metrics['mpjpe']:.6f} "
-                f"val_pck_0_2={val_metrics['pck_0_2']:.6f} "
-                f"lr={current_lr:.2e} "
-                f"epoch_time={epoch_time:.1f}s"
-            )
+            if da_mode:
+                print(
+                    f"epoch={epoch:03d} "
+                    f"src_loss={train_metrics['source_loss']:.6f} "
+                    f"tgt_loss={train_metrics['target_loss']:.6f} "
+                    f"ical={train_metrics['ical']:.6f} "
+                    f"val_mpjpe={val_metrics['mpjpe']:.6f} "
+                    f"val_pck_0_2={val_metrics['pck_0_2']:.6f} "
+                    f"lr={current_lr:.2e} "
+                    f"epoch_time={epoch_time:.1f}s"
+                )
+            else:
+                print(
+                    f"epoch={epoch:03d} "
+                    f"loss={train_metrics['loss']:.6f} "
+                    f"val_mpjpe={val_metrics['mpjpe']:.6f} "
+                    f"val_pck_0_2={val_metrics['pck_0_2']:.6f} "
+                    f"lr={current_lr:.2e} "
+                    f"epoch_time={epoch_time:.1f}s"
+                )
         else:
-            print(
-                f"epoch={epoch:03d} "
-                f"src_loss={train_metrics['source_loss']:.6f} "
-                f"tgt_loss={train_metrics['target_loss']:.6f} "
-                f"ical={train_metrics['ical']:.6f} "
-                f"(skip val) "
-                f"lr={current_lr:.2e} "
-                f"epoch_time={epoch_time:.1f}s"
-            )
+            if da_mode:
+                print(
+                    f"epoch={epoch:03d} "
+                    f"src_loss={train_metrics['source_loss']:.6f} "
+                    f"tgt_loss={train_metrics['target_loss']:.6f} "
+                    f"ical={train_metrics['ical']:.6f} "
+                    f"(skip val) "
+                    f"lr={current_lr:.2e} "
+                    f"epoch_time={epoch_time:.1f}s"
+                )
+            else:
+                print(
+                    f"epoch={epoch:03d} "
+                    f"loss={train_metrics['loss']:.6f} "
+                    f"(skip val) "
+                    f"lr={current_lr:.2e} "
+                    f"epoch_time={epoch_time:.1f}s"
+                )
 
         if patience_counter >= config.early_stopping_patience:
             print(f"Early stopping at epoch {epoch} (no improvement for {patience_counter} val epochs)")
@@ -614,7 +811,7 @@ def run_training(config: TrainConfig) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train the WiFlow pose model with domain adaptation.")
+    parser = argparse.ArgumentParser(description="Train the WiFlow pose model.")
     parser.add_argument("--dataset-root", required=True, help="Path to the NPY memmap dataset directory.")
     parser.add_argument("--output-dir", default="outputs/train", help="Directory for logs and checkpoints.")
     parser.add_argument("--axial-mode", default="spatial_then_temporal", choices=AXIAL_ENCODER_MODES)
@@ -634,6 +831,19 @@ def parse_args() -> argparse.Namespace:
                         help="Stop training after N epochs without val_mpjpe improvement.")
     parser.add_argument("--val-every", type=int, default=1,
                         help="Run validation every N epochs (default: 1).")
+    parser.add_argument("--mode", default="da",
+                        choices=["source_only", "da", "finetune"],
+                        help="Training mode.")
+    parser.add_argument("--few-shot-frames", type=int, default=0,
+                        help="Max frames per action×subject in target domain (0=all).")
+    parser.add_argument("--few-shot-subjects", type=int, default=0,
+                        help="Max subjects in target domain few-shot sampling (0=all).")
+    parser.add_argument("--finetune-from", default="",
+                        help="Path to source-only checkpoint for fine-tuning.")
+    parser.add_argument("--freeze-tier", type=int, default=1,
+                        help="Parameter freezing tier (1 = BN+LN+queries+coord_head only).")
+    parser.add_argument("--finetune-lr", type=float, default=1e-5,
+                        help="Learning rate for fine-tuning (default: 1e-5).")
     # DA arguments
     parser.add_argument("--source-envs", nargs="+", default=["env1"],
                         help="Source domain environment names.")
