@@ -22,7 +22,6 @@ class WiFlowModel(nn.Module):
         axial_mode: str = "spatial_then_temporal",
         decoder_type: str = "joint",
         heatmap_size: int = 36,
-        dropout: float = 0.1,
     ) -> None:
         super().__init__()
         if decoder_type not in DECODER_TYPES:
@@ -32,9 +31,9 @@ class WiFlowModel(nn.Module):
         self.decoder_type = decoder_type
         self.heatmap_size = heatmap_size
         self.spatial_encoder = WiFlowSpatialEncoder(input_channels=input_channels)
-        self.axial_encoder = WiFlowAxialEncoder(mode=axial_mode, dropout=dropout)
+        self.axial_encoder = WiFlowAxialEncoder(mode=axial_mode)
         if decoder_type == "joint":
-            self.decoder = WiFlowJointDecoder(dropout=dropout)
+            self.decoder = WiFlowJointDecoder()
         elif decoder_type == "hierarchical":
             self.decoder = WiFlowHierarchicalJointDecoder()
         else:

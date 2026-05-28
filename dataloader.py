@@ -2,16 +2,16 @@ from __future__ import annotations
 
 """NPY memmap-backed dataloader for MM-Fi pose data."""
 
+import argparse
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
 from data.memmap_dataset import MemmapDataset
 
-ALL_SPLITS = ("train", "val", "test", "all")
+SPLIT_NAMES = ("train", "val", "test")
 
 
 def memmap_collate_fn(batch: list[dict]) -> dict:
@@ -35,16 +35,15 @@ def create_memmap_data_loader(
     num_workers: int = 0,
     shuffle: Optional[bool] = None,
     seed: int = 42,
-    envs: Sequence[str] | None = None,
 ) -> DataLoader:
-    if split not in ALL_SPLITS:
-        raise ValueError(f"split must be one of {ALL_SPLITS}, got {split}")
+    if split not in SPLIT_NAMES:
+        raise ValueError(f"split must be one of {SPLIT_NAMES}, got {split}")
 
     dataset = MemmapDataset(
         data_dir=data_dir,
         split=split,
         seed=seed,
-        envs=list(envs) if envs else None,
+        build_targets=False,
     )
     should_shuffle = shuffle if shuffle is not None else split == "train"
     return DataLoader(
@@ -58,113 +57,47 @@ def create_memmap_data_loader(
     )
 
 
-def create_da_data_loaders(
+def create_memmap_data_loaders(
     data_dir: str | Path,
-    source_envs: Sequence[str],
-    target_envs: Sequence[str],
     batch_size: int,
     num_workers: int = 0,
     seed: int = 42,
 ) -> dict[str, DataLoader]:
-    """Create DataLoaders for domain-adaptation training.
-
-    Source domain uses all filtered data (``split="all"``, no val split).
-    Target domain is split into train / val / test by subject (80/20).
-
-    Returns a dict with keys:
-      ``"source_train"``, ``"target_train"``, ``"target_val"``, ``"target_test"``.
-    """
-    source_dataset = MemmapDataset(
-        data_dir=data_dir,
-        split="all",
-        envs=list(source_envs),
-        seed=seed,
-    )
-    source_loader = DataLoader(
-        source_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        collate_fn=memmap_collate_fn,
-        pin_memory=True,
-        persistent_workers=num_workers > 0,
-    )
-
-    target_loaders: dict[str, DataLoader] = {}
-    for split in ("train", "val", "test"):
-        dataset = MemmapDataset(
+    return {
+        split: create_memmap_data_loader(
             data_dir=data_dir,
             split=split,
-            envs=list(target_envs),
+            batch_size=batch_size,
+            num_workers=num_workers,
             seed=seed,
         )
-        should_shuffle = split == "train"
-        target_loaders[f"target_{split}"] = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=should_shuffle,
-            num_workers=num_workers,
-            collate_fn=memmap_collate_fn,
-            pin_memory=True,
-            persistent_workers=num_workers > 0,
-        )
-
-    return {
-        "source_train": source_loader,
-        **target_loaders,
+        for split in SPLIT_NAMES
     }
 
 
-def create_few_shot_data_loader(
-    data_dir: str | Path,
-    envs: Sequence[str],
-    batch_size: int,
-    few_shot_frames: int = 5,
-    few_shot_subjects: int = 4,
-    num_workers: int = 0,
-    seed: int = 42,
-) -> dict:
-    """Create train/val DataLoaders for few-shot fine-tuning.
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="NPY memmap dataloader preview")
+    parser.add_argument("--dataset-root", type=str, required=True, help="Path to the NPY memmap dataset directory")
+    parser.add_argument("--preview", action="store_true", help="Load one sample from each split and print its shapes")
+    return parser.parse_args()
 
-    Train: few-shot sampled subset of *envs* (≤ few_shot_subjects subjects,
-    ≤ few_shot_frames per action×subject via deterministic uniform spacing).
 
-    Val: ALL data in *envs* excluding the few-shot train indices.
+def main() -> None:
+    args = parse_args()
+    data_dir = Path(args.dataset_root)
+    if not data_dir.is_dir():
+        raise FileNotFoundError(f"Dataset directory does not exist: {data_dir}")
 
-    Returns dict with keys: ``"train"``, ``"val"``, ``"train_indices"``.
-    """
-    train_dataset = MemmapDataset(
-        data_dir=data_dir, split="all", envs=list(envs),
-        seed=seed,
-        few_shot_frames=few_shot_frames,
-        few_shot_subjects=few_shot_subjects,
-    )
-    train_indices = train_dataset.indices.copy()
+    for split in SPLIT_NAMES:
+        dataset = MemmapDataset(data_dir=data_dir, split=split, build_targets=False)
+        print(f"{split}: {len(dataset)} samples")
 
-    # Val = full target domain minus few-shot train
-    full_dataset = MemmapDataset(
-        data_dir=data_dir, split="all", envs=list(envs),
-        seed=seed,
-    )
-    train_idx_set = set(int(i) for i in train_indices)
-    val_indices = np.asarray(sorted(
-        [i for i in full_dataset.indices if int(i) not in train_idx_set]
-    ), dtype=np.int64)
+    if args.preview:
+        for split in SPLIT_NAMES:
+            dataset = MemmapDataset(data_dir=data_dir, split=split, build_targets=False)
+            sample = dataset[0]
+            print(f"{split}_preview: csi={tuple(sample['csi'].shape)}, kpts18={tuple(sample['kpts18'].shape)}, meta={sample['meta']}")
 
-    val_dataset = MemmapDataset(
-        data_dir=data_dir, split="all", envs=list(envs),
-        seed=seed,
-    )
-    val_dataset.indices = val_indices
 
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, collate_fn=memmap_collate_fn,
-        pin_memory=True, persistent_workers=num_workers > 0,
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, collate_fn=memmap_collate_fn,
-        pin_memory=True, persistent_workers=num_workers > 0,
-    )
-    return {"train": train_loader, "val": val_loader, "train_indices": train_indices}
+if __name__ == "__main__":
+    main()

@@ -1,57 +1,36 @@
 # Repository Guidelines
 
-## Project Overview
-Wi-Pose (v2): WiFi CSI-based single-frame 3D human pose estimation via OpenPose18 skeleton regression. The model takes CSI amplitude from three antennas and predicts 18 keypoint coordinates using attention-based architecture with structured skeleton priors.
-
-Remote: `git@github.com:allforkarina/Wi-Posev2.git`
-
 ## Project Structure & Module Organization
-- `dataloader.py`: Core module for loading NPY memmap datasets, providing `memmap_collate_fn` (NHWC→NCHW permutation), and factory functions `create_memmap_data_loader` / `create_memmap_data_loaders` for train/val/test splits.
-- `data/memmap_dataset.py`: NPY memmap dataset reader with zero-copy OS-cached I/O. Loads CSI amplitude (3 normalization modes: `global_minmax`, `global_zscore`, `zscore`), OpenPose18 keypoints from `ground_truth.npy`, and metadata (action/subject/environment/frame_idx) from `meta.npz`. Supports environment/subject-based split construction and random val splitting.
-- `data/heatmap_gt.py`: Functions for generating OpenPose18 PCM (Gaussian heatmaps) and PAF (bone vector fields) targets from normalized keypoint coordinates.
-- `pose_targets.py`: Torch utilities for online OpenPose18 PCM/PAF target synthesis from normalized coordinates (`build_pcm_targets`, `build_paf_targets`, `build_pcm_paf_targets`), coordinate-to-heatmap mapping (`keypoints_to_heatmap_coords`), and argmax PCM decoding back to normalized keypoints (`decode_pcm_argmax`).
-- `models/`: PyTorch model code — all modules use `from __future__ import annotations`.
-  - `models/skeleton.py`: OpenPose18 skeleton topology — 18 keypoints, 19 bone edges (including cross-body diagonals `(2,8)` and `(5,11)`), and `build_normalized_adjacency()` for GNN-based skeleton refinement.
-  - `models/wiflow_spatial_encoder.py`: CSI spatial encoder with antenna mixing (1×1 conv), feature stem, and symmetric time-frequency residual downsample blocks. Transforms `[B, 3, 114, 64]` → `[B, 128, 29, 16]`. Uses `SymmetricResidualDownsampleBlock` with 3×3 conv + 1×1 shortcut, stride-2 on both time and subcarrier axes.
-  - `models/wiflow_axial_encoder.py`: Axial attention encoder with 4 modes: `spatial_then_temporal`, `temporal_then_spatial`, `parallel_sum`, `parallel_concat`. Applies 8-head multi-head attention along spatial (subcarrier) and temporal dimensions separately, then projects from 128 → 256 channels via 1×1 conv. Input `[B, 128, 29, 10]` → output `[B, 256, 29, 10]`.
-  - `models/wiflow_joint_decoder.py`: Multi-layer joint cross-attention decoder. Maintains 18 learnable joint query embeddings that attend to spatial encoder tokens via 8-head cross-attention, followed by FFN and GNN-based skeleton message passing. Outputs `[B, 18, 2]` normalized coordinates.
-  - `models/wiflow_hierarchical_joint_decoder.py`: Hierarchical joint decoder with staged retrieval — each stage retrieves one joint subset, attending to both spatial tokens and previously retrieved joint context. Outputs `[B, 18, 2]` normalized coordinates.
-  - `models/wiflow_heatmap_decoder.py`: MultiFormer-style MSFN heatmap decoder with PAPM feedback. `WiFlowHeatmapDecoder` (one stage): shared 5-conv backbone → bottleneck → PCM + PAF heads (18 PCM + 38 PAF = 56 heatmap channels). `WiFlowPAPM`: pose-aware feature modulation using channel gate + spatial gate from previous-stage heatmaps. `WiFlowMSFNDecoder`: 3-stage progressive refinement with PAPM feedback, outputs `{"keypoints": tensor, "stages": list}`.
-  - `models/wiflow_model.py`: End-to-end `WiFlowModel` orchestrating `spatial_encoder → axial_encoder → decoder` (one of `joint`, `hierarchical`, or `heatmap_msfn`). For heatmap decoder, applies `decode_pcm_argmax` on last-stage PCM for coordinate output.
-- `train.py`: Training entrypoint. Provides `TrainConfig` dataclass, loss functions (`coord_l1 + bone_loss_weight * bone_l1` for direct decoders, multi-stage PCM/PAF MSE for heatmap decoders), metrics (MPJPE, PCK at thresholds 0.1–0.5), `OneCycleLR` scheduler with cosine annealing, gradient clipping, checkpointing (best_val_mpjpe, best_val_pck_0_2, last), and CSV logging to `train_log.csv`.
-- `eval.py`: Evaluation entrypoint. Loads checkpoints (reconstructs model from saved `train_config`), runs single-pass inference on test split, outputs per-joint / per-action / per-environment CSVs. Supports `--feature-viz` flag for research-grade intermediate feature visualization.
+- `dataloader.py`: Core module for loading NPY memmap datasets, creating PyTorch `DataLoader` instances with `memmap_collate_fn`, and providing `create_memmap_data_loader` / `create_memmap_data_loaders` factory functions.
+- `data/memmap_dataset.py`: NPY memmap dataset reader that loads CSI amplitude, OpenPose18 keypoints, and metadata from `.npy`/`.npz` files with zero-copy OS-cached I/O.
+- `data/heatmap_gt.py`: Functions for generating OpenPose18 PCM/PAF targets from normalized keypoint coordinates.
+- `pose_targets.py`: Torch utilities for online OpenPose18 PCM/PAF target synthesis from normalized coordinates and argmax PCM decoding back to normalized keypoints.
+- `models/`: PyTorch model code, including the full WiFlow model, CSI spatial encoder with symmetric spatio-temporal downsampling, axial attention encoder, spatial-temporal fuser (legacy), multi-layer joint cross-attention decoder, hierarchical joint decoder ablation, MultiFormer-style MSFN heatmap decoder with PAPM feedback, legacy temporal encoder, legacy attention pooler, legacy skeleton-aware decoder, and shared OpenPose18 skeleton topology. The active single-frame model path is CSI amplitude input -> spatial encoder with antenna mixing, feature stem, and symmetric time-frequency residual blocks -> axial encoder -> the configured decoder.
+- `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and CSV logging.
+- `eval.py`: Root-level evaluation entrypoint for loading checkpoints, computing test metrics, and optionally generating research-grade feature visualizations via `--feature-viz`.
 - `evaluation/`: Evaluation pipeline package.
-  - `evaluation/hooks.py`: Context manager (`WiFlowHookContext`, `wiflow_hooks`) for non-invasive forward hook registration on WiFlow submodules — collects intermediate feature outputs with automatic cleanup.
-  - `evaluation/feature_viz.py`: Orchestrator and 6 figure-drawing functions: (1) antenna channel response, (2) resblock PCA trajectory, (3) axial attention maps, (4) joint query t-SNE + cosine similarity, (5) PCM/PAF heatmap quality radar chart, (6) feature-pose Pearson correlation landscape. Supports `png`/`pdf` output with customizable figure dimensions.
+  - `evaluation/hooks.py`: Forward hook context manager (`WiFlowHookContext`, `wiflow_hooks`) for non-invasive intermediate feature extraction from WiFlow submodules.
+  - `evaluation/feature_viz.py`: Orchestrator and 6 figure-drawing functions for research-grade feature visualization (antenna channel response, resblock PCA trajectory, axial attention maps, joint query t-SNE, PCM/PAF heatmap quality, feature-pose correlation).
 - `scripts/`: Preprocessing and diagnostic utilities.
-  - `scripts/build_memmap.py`: Builds NPY memmap dataset from raw MM-Fi directory structure.
+  - `scripts/build_memmap.py`: Command-line wrapper that builds an NPY memmap dataset from the raw MM-Fi directory structure.
   - `scripts/build_groundtruth.py`: Builds ground-truth keypoint statistics and visualizations.
-  - `scripts/visualize_gt.py`: Visualizes ground-truth pose annotations overlaid on video frames.
-  - `scripts/diagnose_loss.py`: Standalone loss diagnostic for analyzing PCM prediction quality per joint.
-- `tests/`: `pytest` unit tests (13 test files). Mirror module names: `test_dataloader.py`, `test_memmap_dataset.py`, `test_pose_targets.py`, `test_skeleton.py`, `test_wiflow_model.py`, `test_wiflow_spatial_encoder.py`, `test_wiflow_axial_encoder.py`, `test_wiflow_joint_decoder.py`, `test_wiflow_hierarchical_joint_decoder.py`, `test_wiflow_msfn_decoder.py`, `test_train.py`, `test_eval.py`. `conftest.py` adds project root to `sys.path`. Tests directory is in `.gitignore` (local use only).
-- `docs/`: Planning documents and architecture analysis (memmap migration, model architecture, project architecture, superpowers plans).
-- `.gitignore`: Excludes Python caches, environments, datasets (`*.npy`, `*.npz`, `*.h5`), checkpoints (`*.pth`, `*.pt`), outputs, and `tests/` directory.
+  - `scripts/visualize_gt.py`: Visualizes ground-truth pose annotations overlaid on corresponding video frames.
+  - `scripts/diagnose_loss.py`: Standalone loss diagnostic tool for analyzing PCM prediction quality per joint.
+- `tests/`: `pytest` unit tests. Mirror module names such as `tests/test_dataloader.py`, `tests/test_wiflow_model.py`, or `tests/test_wiflow_decoder.py`.
+- `.gitignore`: Excludes Python caches, local environments, generated datasets, checkpoints, and editor files from Git.
 
-## Data Flow
-```
-Raw CSI [B, 3, 114, 64] (channels-first: antenna × subcarrier × time)
-  → spatial_encoder → [B, 128, 29, 16]
-  → axial_encoder → [B, 256, 29, 10]
-  → decoder → [B, 18, 2] normalized keypoints (or {"keypoints": ..., "stages": [...]})
-```
-
-The subcarrier axis (114) carries spatial-frequency response, the antenna axis (3) carries spatial phase-difference/direction information, and the temporal axis (64, upsampled from 10 original time shots) carries motion/Doppler cues.
+Generated datasets can be large and should not be committed. Keep raw dataset roots outside the repository.
 
 ## Project Domain Knowledge
-- One CSI sample: `64 time steps × 3 antennas × 114 subcarriers`. Model input: `[B, 3, 114, 64]` (channels-first).
-- Only CSI amplitude is used (3 channels, one per antenna). Phase information is not used.
-- Target pose: OpenPose18 keypoint set (18 joints: Nose, Neck, RSh, RElb, RWr, LSh, LElb, LWr, RHip, RKnee, RAnk, LHip, LKnee, LAnk, REye, LEye, REar, LEar). 19 bone edges including cross-body diagonals `(2,8)` and `(5,11)`.
-- CSI is a low-resolution, high-noise, implicit sensing signal. Strong skeleton priors are critical for accurate regression.
-- Preserve CSI physical dimension semantics: avoid arbitrary flattening or pooling that mixes antenna/subcarrier/temporal meanings before attention-based selection.
-- Prefer attention-based information selection over destructive pooling; use structured supervision (bone loss, PCM/PAF multi-stage) alongside coordinate loss.
+- One CSI sample is a physical signal tensor shaped `64 time steps x 3 antennas x 114 subcarriers` in the NPY memmap dataset. The model input is `[B, 3, 114, 64]` (channels-first). The subcarrier axis carries spatial-frequency response, the antenna axis carries spatial phase-difference and direction information, and the temporal axis (64 steps, upsampled from 10 original time shots) carries motion cues such as Doppler effects.
+- Only CSI amplitude is used as input (3 channels, one per antenna). Phase information is not used.
+- The target pose is the structured OpenPose18 keypoint set (18 joints including neck). The 18 joints are not independent coordinates; they are constrained by the human skeleton topology (19 bone edges).
+- The central modeling gap is that CSI is a low-resolution, high-noise, implicit sensing signal, while pose regression needs precise coordinates. Strong skeleton priors are important for bridging that gap.
+- Preserve CSI physical dimension semantics where practical. Avoid arbitrary flattening or pooling that mixes antenna, subcarrier, and temporal meanings before the model has selected useful information.
+- Prefer attention-based information selection over destructive pooling for low-SNR CSI features, and use structured supervision such as bone or topology-aware losses in addition to coordinate losses.
 
 ## Build, Test, and Development Commands
-Activate the Conda environment first:
+Use the existing Conda environment for development commands:
 
 ```powershell
 conda activate WiFiPose
@@ -64,70 +43,47 @@ Build an NPY memmap dataset:
 python scripts\build_memmap.py --dataset-root D:\path\to\raw\dataset --output-dir data\mmfi_pose --seed 42
 ```
 
-Run tests (from project root):
+Run tests:
 
 ```powershell
 pytest
 ```
 
-Domain adaptation (cross-environment) training:
+Run a quick training sanity check:
 
 ```powershell
-python train.py --dataset-root data\mmfi_pose --source-envs lab --target-envs corridor --epochs 50 --batch-size 64 --output-dir outputs\train_da
+python train.py --dataset-root data\mmfi_pose --epochs 5 --subset-size 32 --output-dir outputs\sanity
 ```
 
-Disable CECE (ICAL-only ablation):
-
-```powershell
-python train.py --dataset-root data\mmfi_pose --source-envs lab --target-envs corridor --no-cece --output-dir outputs\train_da_no_cece
-```
-
-Adjust ICAL strength and warmup:
-
-```powershell
-python train.py --dataset-root data\mmfi_pose --source-envs lab --target-envs corridor --alpha 0.5 --ical-warmup-epochs 10 --output-dir outputs\train_da_alpha05
-```
-
-Decoder ablation with DA:
-
-```powershell
-python train.py --dataset-root data\mmfi_pose --source-envs lab --target-envs corridor --decoder-type hierarchical --output-dir outputs\train_da_hierarchical
-```
-
-Quick DA sanity check (2 epochs):
-
-```powershell
-python train.py --dataset-root data\mmfi_pose --source-envs lab --target-envs corridor --epochs 2 --batch-size 4 --output-dir outputs\sanity_da
-```
-
-Supported `--source-envs` / `--target-envs` values: environment names from the dataset (e.g., "lab", "corridor").
-
-Default training:
+Run the default training configuration:
 
 ```powershell
 python train.py --dataset-root data\mmfi_pose --epochs 50 --batch-size 64 --output-dir outputs\train
 ```
 
-Default config: CSI amplitude (3ch), `OneCycleLR` (cosine annealing, pct_start=0.3), gradient clipping (norm=1.0), `(source_coord_l1 + target_coord_l1) / 2 + (source_bone_l1 + target_bone_l1) / 2 * 0.5 + alpha * ICAL` for direct decoders, AdamW (lr=2e-5, max_lr=5e-4, weight_decay=5e-4). Default source="lab", target="corridor", alpha=0.1, ical_warmup_epochs=5.
+The default training configuration uses CSI amplitude input (3 channels), `OneCycleLR`, gradient clipping, `coord_l1 + 0.5 * bone_l1`, the baseline axial mode `spatial_then_temporal`, and AdamW weight decay.
 
-Axial encoder ablation:
+Run an axial-attention encoder ablation:
 
 ```powershell
 python train.py --dataset-root data\mmfi_pose --axial-mode temporal_then_spatial --epochs 50 --batch-size 64 --output-dir outputs\train_temporal_then_spatial
 ```
 
-Supported `--axial-mode` values: `spatial_then_temporal`, `temporal_then_spatial`, `parallel_sum`, `parallel_concat`.
-
-Decoder ablation:
+Run a hierarchical decoder ablation:
 
 ```powershell
 python train.py --dataset-root data\mmfi_pose --decoder-type hierarchical --epochs 50 --batch-size 64 --output-dir outputs\train_hierarchical_decoder
+```
+
+Run a MultiFormer-style MSFN heatmap decoder ablation:
+
+```powershell
 python train.py --dataset-root data\mmfi_pose --decoder-type heatmap_msfn --epochs 50 --batch-size 64 --output-dir outputs\train_heatmap_msfn
 ```
 
-Supported `--decoder-type` values: `joint`, `hierarchical`, `heatmap_msfn`.
+The `heatmap_msfn` decoder uses OpenPose18 labels, synthesizes PCM/PAF targets online from normalized coordinates, trains with multi-stage PCM/PAF MSE, and decodes the last-stage PCM by argmax for MPJPE/PCK. It exposes `--heatmap-size`, `--heatmap-sigma`, `--paf-width`, and `--paf-loss-weight`; default MSFN internals use 3 stages, 128 heatmap feature channels, 512 decoder hidden channels, and PAPM feedback from concatenated PCM/PAF.
 
-The `heatmap_msfn` decoder uses 3 stages, 128 heatmap feature channels, 512 decoder hidden channels, PAPM feedback from concatenated PCM/PAF, and argmax decoding on last-stage PCM. Exposes `--heatmap-size` (default 36), `--heatmap-sigma` (default 1.5), `--paf-width` (default 1.0), `--paf-loss-weight` (default 1.0).
+Supported `--axial-mode` values are `spatial_then_temporal`, `temporal_then_spatial`, `parallel_sum`, and `parallel_concat`. Supported `--decoder-type` values are `joint`, `hierarchical`, and `heatmap_msfn`. Checkpoints store the selected mode, decoder type, and heatmap settings in `train_config`, and evaluation rebuilds the model from that saved configuration.
 
 Evaluate one checkpoint:
 
@@ -135,46 +91,27 @@ Evaluate one checkpoint:
 python eval.py --dataset-root data\mmfi_pose --checkpoint outputs\train\best_val_mpjpe.pth --output-dir outputs\eval
 ```
 
-Evaluate with feature visualization:
-
-```powershell
-python eval.py --dataset-root data\mmfi_pose --checkpoint outputs\train\best_val_mpjpe.pth --output-dir outputs\eval --feature-viz --num-action-samples 3 --output-format both
-```
-
 ## Coding Style & Naming Conventions
-- Python 3.10+ with `from __future__ import annotations` at the top of every module.
-- Type hints on function signatures; `pathlib.Path` for paths.
-- Imports: standard library → third-party (`torch`, `numpy`) → local (project modules).
-- Naming: `snake_case` for functions/variables, `PascalCase` for classes, uppercase for constants (`NUM_OPENPOSE_KEYPOINTS`, `OPENPOSE_BONE_EDGES`, `PCK_THRESHOLDS`).
-- 4-space indentation. Keep comments focused on shape contracts, normalization assumptions, and physical dimension semantics.
-- Use Chinese for conversational replies; English for code, comments, and documentation.
+Use Python 3.10+ syntax, type hints, and `pathlib.Path` for paths. Group imports as standard library, third-party, then local. Follow existing naming: `snake_case` functions/variables, `PascalCase` classes, and uppercase constants such as `NUM_OPENPOSE_KEYPOINTS`. Use 4-space indentation. Keep comments focused on dataset assumptions, shapes, and normalization.
 
 ## Testing Guidelines
-- Framework: `pytest`. Files named `test_*.py`, functions named `test_<behavior>()`.
-- `conftest.py` adds project root to `sys.path` so all test files can import project modules directly.
-- Tests directory is gitignored (local verification only).
-- Use temporary directories and tiny synthetic fixtures for datasets/models.
-- Test coverage areas: split generation, path validation, shape validation, normalization, model shape contracts, PCM/PAF target synthesis, heatmap decoder stage outputs, memmap dataset loading.
+Automated tests use `pytest`. Add tests for split generation, path validation, shape validation, normalization edge cases, model shape contracts, PCM/PAF target synthesis, heatmap decoder stage outputs, and memmap dataset loading. Name files `test_*.py` and tests `test_<behavior>()`. Use temporary directories and tiny synthetic fixtures.
 
-## Training & Evaluation Outputs
-- Output directory: `outputs/` by default (gitignored).
-- Checkpoints: `best_val_mpjpe.pth`, `best_val_pck_0_2.pth`, `last.pth` — each stores `model_state_dict`, `optimizer_state_dict`, `scheduler_state_dict`, `epoch`, `best_metric`, and `train_config` (serialized `TrainConfig` as dict).
-- Training log: `train_log.csv` — appended per epoch with loss components, MPJPE, PCK at multiple thresholds, LR, epoch time.
-- Evaluation: `per_joint_metrics.csv`, `per_action_metrics.csv`, `per_environment_metrics.csv`.
-- Feature visualization: `.png`/`.pdf` figures grouped by action/environment samples.
+Training and evaluation outputs are written under `outputs/` by default. Checkpoints include `best_val_mpjpe.pth`, `best_val_pck_0_2.pth`, and `last.pth`; epoch metrics are appended to `train_log.csv`. Evaluation visualizations are saved as `.png` files grouped by action/environment samples.
 
-## Commit & Push Guidelines
-- Use concise imperative commit messages (e.g., `Add NPY memmap dataset support`).
-- Remote: `git@github.com:allforkarina/Wi-Posev2.git` (branch: `main`).
-- After each project modification, commit the change and push to the remote in the same turn unless the user explicitly asks not to push.
-- Do not commit generated datasets, virtual environments, checkpoints, or `tests/` directory.
+## Commit & Pull Request Guidelines
+This checkout has no `.git` history, so no convention can be inferred. Use concise imperative commits, for example `Add NPY memmap dataset support`. Pull requests should include a summary, commands run, dataset assumptions, and relevant shape or frame-count output. Do not commit generated datasets, virtual environments, or machine-specific paths.
 
-## Security & Configuration
-- Do not hard-code dataset paths. Use `--dataset-root` CLI argument.
-- Keep large datasets and sensitive files outside version control.
+## Security & Configuration Tips
+Do not hard-code private dataset locations beyond documented defaults. Pass dataset paths with `--dataset-root` and keep large or sensitive data outside version control.
 
 ## Agent-Specific Instructions
-- Before changing code, prefer the smallest working change; avoid unrelated refactors.
-- After each project modification, commit and push to the configured GitHub remote unless explicitly told not to.
-- Before running project code or tests, activate Conda environment: `conda activate WiFiPose`.
-- Update this `AGENTS.md` file whenever project structure, commands, or workflows change.
+Write repository-facing agent notes, documentation, and code comments in English. Keep comments neatly aligned with surrounding style. Use Chinese for conversational replies unless the user requests another language.
+
+Whenever project code changes, update this `AGENTS.md` file in the same turn if the change affects commands, structure, conventions, testing, configuration, or agent workflow.
+
+After each project modification, commit the change and push it to the configured GitHub remote in the same turn unless the user explicitly asks not to push.
+
+Before changing code, apply the `karpathy-guidelines` skill: state assumptions when needed, prefer the smallest working change, avoid unrelated refactors, and verify the result with a concrete check.
+
+Before running project code or tests, activate the existing Conda environment with `conda activate WiFiPose` to ensure commands run in the established project environment.

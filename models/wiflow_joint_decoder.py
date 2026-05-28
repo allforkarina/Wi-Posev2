@@ -42,7 +42,7 @@ class WiFlowJointCrossAttentionLayer(nn.Module):
 class WiFlowJointDecoder(nn.Module):
     """Decode OpenPose18 coordinates from [B, 256, 29, 16] feature maps."""
 
-    def __init__(self, num_layers: int = 3, dropout: float = 0.1) -> None:
+    def __init__(self, num_layers: int = 3) -> None:
         super().__init__()
         if num_layers < 1:
             raise ValueError("num_layers must be at least 1")
@@ -62,7 +62,7 @@ class WiFlowJointDecoder(nn.Module):
             embed_dim=self.embedding_dim,
             num_heads=self.num_heads,
             batch_first=True,
-            dropout=dropout,
+            dropout=0.0,
         )
         self.attention_norm = nn.LayerNorm(self.embedding_dim)
         self.coordinate_head = nn.Sequential(

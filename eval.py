@@ -8,7 +8,6 @@ import csv
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -264,30 +263,6 @@ def parse_args() -> argparse.Namespace:
         "--figure-height", type=float, default=None,
         help="Override default figure height in inches.",
     )
-    parser.add_argument(
-        "--cross-env-viz", action="store_true", default=False,
-        help="Generate cross-environment feature difference visualization.",
-    )
-    parser.add_argument(
-        "--source-env", default="env1",
-        help="Source environment name for cross-env comparison (default: env1).",
-    )
-    parser.add_argument(
-        "--target-env", default="env2",
-        help="Target environment name for cross-env comparison (default: env2).",
-    )
-    parser.add_argument(
-        "--eval-envs", nargs="+", default=None,
-        help="Filter evaluation to specific environments, e.g. --eval-envs env2 (default: all).",
-    )
-    parser.add_argument(
-        "--eval-split", default="test", choices=["train", "val", "test", "all"],
-        help="Dataset split to evaluate on (default: test). Use 'all' for full-domain eval.",
-    )
-    parser.add_argument(
-        "--exclude-indices", default=None,
-        help="Path to .npy file with frame indices to exclude from evaluation.",
-    )
     return parser.parse_args()
 
 
@@ -298,24 +273,11 @@ def main() -> None:
 
     test_loader = create_memmap_data_loader(
         data_dir=args.dataset_root,
-        split=args.eval_split,
+        split="test",
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         shuffle=False,
-        envs=args.eval_envs,
     )
-
-    if args.exclude_indices is not None:
-        exclude_path = Path(args.exclude_indices)
-        if not exclude_path.exists():
-            raise FileNotFoundError(f"Exclude indices file not found: {exclude_path}")
-        exclude_set = set(np.load(str(exclude_path)).astype(int).tolist())
-        before = len(test_loader.dataset.indices)
-        test_loader.dataset.indices = np.asarray(sorted(
-            [i for i in test_loader.dataset.indices if int(i) not in exclude_set]
-        ), dtype=np.int64)
-        print(f"Excluded {before - len(test_loader.dataset.indices)} few-shot train samples, "
-              f"{len(test_loader.dataset.indices)} remaining for evaluation.")
 
     # --- single-pass evaluation ---
     result = run_evaluation(model, test_loader, device)
@@ -349,24 +311,6 @@ def main() -> None:
             figure_height=args.figure_height,
         )
         print("Feature visualization complete.")
-
-    # --- cross-environment feature comparison (optional) ---
-    if args.cross_env_viz:
-        from evaluation.cross_env_viz import run_cross_env_visualization
-
-        print("\n--- Cross-Environment Feature Comparison ---")
-        run_cross_env_visualization(
-            model=model,
-            loader=test_loader,
-            dataset_root=args.dataset_root,
-            output_dir=output_dir,
-            device=device,
-            source_env=args.source_env,
-            target_env=args.target_env,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-        )
-        print("Cross-environment visualization complete.")
 
 
 if __name__ == "__main__":
