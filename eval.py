@@ -8,10 +8,12 @@ import csv
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
+import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
-from dataloader import create_memmap_data_loader
+from data.memmap_dataset import MemmapDataset
+from dataloader import create_memmap_data_loader, memmap_collate_fn
 from models import WiFlowModel
 from train import (
     compute_metrics,
@@ -244,8 +246,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
+        "--eval-envs", nargs="*", default=None,
+        help="Filter by environment names (e.g., --eval-envs env1 env2). Evaluates all if not set.",
+    )
+    parser.add_argument(
+        "--exclude-indices", default=None,
+        help="Path to .npy file containing frame indices to exclude from evaluation.",
+    )
+    parser.add_argument(
         "--feature-viz", action="store_true", default=False,
-        help="Generate 6 research-grade feature visualization figures.",
+        help="Generate research-grade feature visualization figures.",
     )
     parser.add_argument(
         "--num-action-samples", type=int, default=3,
@@ -271,12 +281,28 @@ def main() -> None:
     device = select_device(args.device)
     model = load_checkpoint_model(args.checkpoint, device)
 
-    test_loader = create_memmap_data_loader(
+    eval_envs = tuple(args.eval_envs) if args.eval_envs else None
+    test_dataset = MemmapDataset(
         data_dir=args.dataset_root,
-        split="test",
+        split="all",
+        envs=eval_envs,
+    )
+
+    if args.exclude_indices:
+        exclude = np.load(args.exclude_indices)
+        exclude_set = set(exclude.tolist())
+        keep = [i for i in range(len(test_dataset)) if i not in exclude_set]
+        test_dataset = Subset(test_dataset, keep)
+        print(f"Excluded {len(exclude_set)} few-shot indices, {len(test_dataset)} remaining")
+
+    test_loader = DataLoader(
+        test_dataset,
         batch_size=args.batch_size,
-        num_workers=args.num_workers,
         shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=memmap_collate_fn,
+        pin_memory=True,
+        persistent_workers=args.num_workers > 0,
     )
 
     # --- single-pass evaluation ---
