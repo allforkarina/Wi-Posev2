@@ -3,9 +3,11 @@ from __future__ import annotations
 """NPY memmap-backed dataloader for MM-Fi pose data."""
 
 import argparse
+import random
 from pathlib import Path
 from typing import Optional, Sequence
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -135,6 +137,66 @@ def create_da_data_loaders(
         "source_train": source_loader,
         **target_loaders,
     }
+
+
+def create_few_shot_data_loader(
+    data_dir: str | Path,
+    envs: Sequence[str],
+    batch_size: int,
+    few_shot_frames: int = 5,
+    few_shot_subjects: int = 4,
+    val_ratio: float = 0.2,
+    num_workers: int = 0,
+    seed: int = 42,
+) -> dict[str, DataLoader]:
+    """Create train/val DataLoaders with few-shot target-domain sampling.
+
+    ``split="all"`` filtered to envs, then few-shot sampling reduces to
+    ≤ few_shot_frames per action×subject and ≤ few_shot_subjects.
+    The result is split by subject into train (1 - val_ratio) and val.
+    """
+    full_dataset = MemmapDataset(
+        data_dir=data_dir, split="all", envs=list(envs),
+        seed=seed, build_targets=False,
+        few_shot_frames=few_shot_frames, few_shot_subjects=few_shot_subjects,
+    )
+
+    subjects = sorted(set(
+        str(full_dataset._samples[int(i)]) for i in full_dataset.indices
+    ))
+    rng = random.Random(seed)
+    rng.shuffle(subjects)
+    n_val = max(1, int(len(subjects) * val_ratio))
+    val_subjects = set(subjects[:n_val])
+    train_subjects = set(subjects[n_val:])
+
+    def _make_dataset(_subjects: set[str]) -> MemmapDataset:
+        ds = MemmapDataset(
+            data_dir=data_dir, split="all", envs=list(envs),
+            seed=seed, build_targets=False,
+            few_shot_frames=few_shot_frames,
+            few_shot_subjects=few_shot_subjects,
+        )
+        ds.indices = np.asarray(sorted(
+            [i for i in ds.indices
+             if str(ds._samples[int(i)]) in _subjects]
+        ), dtype=np.int64)
+        return ds
+
+    train_dataset = _make_dataset(train_subjects)
+    val_dataset = _make_dataset(val_subjects)
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, collate_fn=memmap_collate_fn,
+        pin_memory=True, persistent_workers=num_workers > 0,
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, collate_fn=memmap_collate_fn,
+        pin_memory=True, persistent_workers=num_workers > 0,
+    )
+    return {"train": train_loader, "val": val_loader}
 
 
 def parse_args() -> argparse.Namespace:
