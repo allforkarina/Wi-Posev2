@@ -45,6 +45,8 @@ class MemmapDataset(Dataset):
         paf_width: float = 1.0,
         pose_range: tuple[float, float] = (-0.8, 0.8),
         build_targets: bool = True,
+        few_shot_frames: int = 0,
+        few_shot_subjects: int = 0,
     ) -> None:
         if split not in {"train", "val", "test", "all"}:
             raise ValueError(f"split must be train/val/test/all, got {split}")
@@ -72,6 +74,9 @@ class MemmapDataset(Dataset):
 
         self.indices = self._build_split(
             split, envs, train_subjects, test_subjects, random_val_ratio, seed
+        )
+        self.indices = self._sample_few_shot(
+            self.indices, few_shot_frames, few_shot_subjects, seed,
         )
 
     def _build_split(
@@ -119,6 +124,41 @@ class MemmapDataset(Dataset):
                 return np.asarray(sorted(val_indices), dtype=np.int64)
 
         return np.asarray(sorted(candidate_indices), dtype=np.int64)
+
+    def _sample_few_shot(
+        self,
+        indices: np.ndarray,
+        few_shot_frames: int,
+        few_shot_subjects: int,
+        seed: int,
+    ) -> np.ndarray:
+        if few_shot_frames <= 0 and few_shot_subjects <= 0:
+            return indices
+
+        rng = random.Random(seed + 1)
+
+        grouped: dict[tuple[str, str], list[int]] = {}
+        for idx in indices:
+            idx_int = int(idx)
+            key = (str(self._actions[idx_int]), str(self._samples[idx_int]))
+            grouped.setdefault(key, []).append(idx_int)
+
+        if few_shot_subjects > 0:
+            all_subjects = sorted(set(k[1] for k in grouped))
+            chosen_subjects = set(rng.sample(
+                all_subjects, min(few_shot_subjects, len(all_subjects)),
+            ))
+            grouped = {k: v for k, v in grouped.items() if k[1] in chosen_subjects}
+
+        result: list[int] = []
+        for (_action, _subject), frame_indices in sorted(grouped.items()):
+            if few_shot_frames > 0:
+                sampled = rng.sample(frame_indices, min(few_shot_frames, len(frame_indices)))
+            else:
+                sampled = frame_indices
+            result.extend(sampled)
+
+        return np.asarray(sorted(result), dtype=np.int64)
 
     def __len__(self) -> int:
         return len(self.indices)
