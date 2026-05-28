@@ -33,12 +33,12 @@ class TrainConfig:
     decoder_type: str = "joint"
     epochs: int = 50
     batch_size: int = 128
-    lr: float = 1e-5
-    max_lr: float = 1e-4
-    weight_decay: float = 1e-3
+    lr: float = 2e-5
+    max_lr: float = 5e-4
+    weight_decay: float = 5e-4
     grad_clip_norm: float = 1.0
     bone_loss_weight: float = 0.5
-    pct_start: float = 0.2
+    pct_start: float = 0.3
     heatmap_size: int = 36
     heatmap_sigma: float = 1.5
     paf_width: float = 1.0
@@ -54,9 +54,9 @@ class TrainConfig:
     ical_sigma_pose: float = 1.0
     cece_enabled: bool = True
     # Regularization / training
-    dropout: float = 0.1
+    dropout: float = 0.0
     amp: bool = True
-    early_stopping_patience: int = 5
+    early_stopping_patience: int = 0  # 0 = disabled
     val_every: int = 1
     # Mode
     mode: str = "da"              # "source_only" | "da" | "finetune"
@@ -846,7 +846,7 @@ def run_training(config: TrainConfig) -> None:
                     f"epoch_time={epoch_time:.1f}s"
                 )
 
-        if patience_counter >= config.early_stopping_patience:
+        if config.early_stopping_patience > 0 and patience_counter >= config.early_stopping_patience:
             print(f"Early stopping at epoch {epoch} (no improvement for {patience_counter} val epochs)")
             break
 
@@ -860,16 +860,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-5, help="Initial learning rate.")
-    parser.add_argument("--max-lr", type=float, default=1e-4, help="Peak learning rate for OneCycleLR.")
-    parser.add_argument("--weight-decay", type=float, default=1e-3, help="AdamW weight decay.")
-    parser.add_argument("--pct-start", type=float, default=0.2,
+    parser.add_argument("--lr", type=float, default=2e-5, help="Initial learning rate.")
+    parser.add_argument("--max-lr", type=float, default=5e-4, help="Peak learning rate for OneCycleLR.")
+    parser.add_argument("--weight-decay", type=float, default=5e-4, help="AdamW weight decay.")
+    parser.add_argument("--pct-start", type=float, default=0.3,
                         help="Fraction of training spent warming up LR in OneCycleLR.")
-    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate for attention layers.")
+    parser.add_argument("--dropout", type=float, default=0.0, help="Dropout rate for attention layers.")
     parser.add_argument("--no-amp", action="store_true", default=False,
                         help="Disable automatic mixed precision.")
-    parser.add_argument("--early-stopping-patience", type=int, default=5,
-                        help="Stop training after N epochs without val_mpjpe improvement.")
+    parser.add_argument("--early-stopping-patience", type=int, default=0,
+                        help="Stop training after N epochs without val_mpjpe improvement (0=disabled).")
     parser.add_argument("--val-every", type=int, default=1,
                         help="Run validation every N epochs (default: 1).")
     parser.add_argument("--mode", default="da",
