@@ -272,6 +272,12 @@ def apply_finetune_tier(model: nn.Module, tier: int = 1) -> int:
             param.requires_grad = keep
             if keep:
                 trainable_params += param.numel()
+    elif tier == 2:
+        for name, param in model.named_parameters():
+            keep = any(kw in name.lower() for kw in ("norm", "bn", "ln", "joint_queries", "coordinate_head", "decoder."))
+            param.requires_grad = keep
+            if keep:
+                trainable_params += param.numel()
     else:
         raise ValueError(f"Unknown freeze tier: {tier}")
     total = sum(p.numel() for p in model.parameters())
@@ -534,7 +540,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--finetune-from", default=None, help="Path to source checkpoint for finetune")
     parser.add_argument("--few-shot-subjects", type=int, default=4)
     parser.add_argument("--few-shot-frames", type=int, default=5)
-    parser.add_argument("--freeze-tier", type=int, default=1)
+    parser.add_argument("--freeze-tier", type=int, default=1,
+                        help="Freeze tier 1 (norms + head only) or 2 (+ decoder).")
     return parser.parse_args()
 
 
