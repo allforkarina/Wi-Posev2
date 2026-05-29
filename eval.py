@@ -176,6 +176,8 @@ def run_evaluation(
     environment_totals: Dict[str, Dict[str, float]] = {}
     joint_error_batches: list[torch.Tensor] = []
     joint_pck_batches: list[torch.Tensor] = []
+    all_predictions: list[np.ndarray] = []
+    all_targets: list[np.ndarray] = []
     sample_count = 0
 
     with torch.no_grad():
@@ -197,12 +199,71 @@ def run_evaluation(
             _update_group_totals(action_totals, batch["action"], errors, pck_mask)
             _update_group_totals(environment_totals, batch["environment"], errors, pck_mask)
 
+            # --- diagnostic: collect raw pred/target for variance analysis ---
+            all_predictions.append(prediction.detach().cpu().numpy())
+            all_targets.append(target.detach().cpu().numpy())
+
     return {
         "overall": _average_metrics(totals, sample_count),
         "joint_rows": _build_joint_rows(joint_error_batches, joint_pck_batches),
         "action_rows": _build_group_rows(action_totals, "action"),
         "environment_rows": _build_group_rows(environment_totals, "environment"),
+        "diagnostic": _compute_diagnostics(all_predictions, all_targets),
     }
+
+
+# ---------------------------------------------------------------------------
+# Mean-pose collapse diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _compute_diagnostics(
+    all_predictions: Sequence[np.ndarray],
+    all_targets: Sequence[np.ndarray],
+) -> Dict[str, Any]:
+    """Compute per-joint variance and mean-pose distance.
+
+    Parameters
+    ----------
+    all_predictions : list of ndarray, each [B, 18, 2]
+    all_targets : list of ndarray, each [B, 18, 2]
+
+    Returns
+    -------
+    dict with ``overall`` averaged metrics and ``joint_rows`` list of dicts.
+    """
+    preds = np.concatenate(list(all_predictions), axis=0)  # [N, 18, 2]
+    targets = np.concatenate(list(all_targets), axis=0)    # [N, 18, 2]
+
+    # per-joint variance over sample axis, averaged over x/y
+    pred_var = preds.var(axis=0).mean(axis=1)   # [18]
+    gt_var = targets.var(axis=0).mean(axis=1)    # [18]
+    var_ratio = np.where(gt_var > 1e-8, pred_var / gt_var, 0.0)
+
+    # L2 distance between per-joint means
+    pred_mean = preds.mean(axis=0)   # [18, 2]
+    gt_mean = targets.mean(axis=0)   # [18, 2]
+    mean_pose_dist = np.linalg.norm(pred_mean - gt_mean, axis=1)  # [18]
+
+    joint_rows = [
+        {
+            "joint_index": j,
+            "pred_var": float(pred_var[j]),
+            "gt_var": float(gt_var[j]),
+            "var_ratio": float(var_ratio[j]),
+            "mean_pose_dist": float(mean_pose_dist[j]),
+        }
+        for j in range(18)
+    ]
+
+    overall = {
+        "overall_pred_var": float(pred_var.mean()),
+        "overall_gt_var": float(gt_var.mean()),
+        "overall_var_ratio": float(var_ratio.mean()),
+        "overall_mean_pose_dist": float(mean_pose_dist.mean()),
+    }
+
+    return {"overall": overall, "joint_rows": joint_rows}
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +385,12 @@ def main() -> None:
     _write_csv(output_dir / "per_joint_metrics.csv", result["joint_rows"])
     _write_csv(output_dir / "per_action_metrics.csv", result["action_rows"])
     _write_csv(output_dir / "per_environment_metrics.csv", result["environment_rows"])
+    _write_csv(output_dir / "per_joint_diagnostic.csv", result["diagnostic"]["joint_rows"])
+
+    print("\n--- Diagnostic Metrics (mean-pose collapse) ---")
+    for name in sorted(result["diagnostic"]["overall"]):
+        print(f"  {name}: {result['diagnostic']['overall'][name]:.6f}")
+    print(f"  (var_ratio < 0.3 strongly suggests mean-pose collapse)")
 
     # --- pose visualization (optional, separate pass) ---
     if args.pose_viz:
