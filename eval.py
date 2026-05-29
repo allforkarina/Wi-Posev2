@@ -34,8 +34,8 @@ def load_checkpoint_model(
 ) -> WiFlowModel:
     """Reconstruct a WiFlowModel from a training checkpoint.
 
-    Reads the saved ``train_config`` dict to restore the correct axial mode,
-    decoder type, and heatmap resolution, then loads the learned weights.
+    Reads the saved ``train_config`` dict to restore the correct axial mode
+    and decoder type, then loads the learned weights.
     """
     checkpoint = torch.load(checkpoint_path, map_location=device)
     if "model_state_dict" not in checkpoint:
@@ -49,7 +49,6 @@ def load_checkpoint_model(
         input_channels=3,
         axial_mode=str(train_config.get("axial_mode", "spatial_then_temporal")),
         decoder_type=str(train_config.get("decoder_type", "joint")),
-        heatmap_size=int(train_config.get("heatmap_size", 36)),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
