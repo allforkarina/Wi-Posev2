@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
@@ -257,6 +258,10 @@ def parse_args() -> argparse.Namespace:
         help="Generate research-grade feature visualization figures.",
     )
     parser.add_argument(
+        "--pose-viz", action="store_true", default=False,
+        help="Generate per-subject joint scatter plots (GT vs Prediction).",
+    )
+    parser.add_argument(
         "--num-action-samples", type=int, default=3,
         help="Samples per action type for feature visualization (default: 3).",
     )
@@ -277,6 +282,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.feature_viz and args.pose_viz:
+        print("Error: --feature-viz and --pose-viz are mutually exclusive", file=sys.stderr)
+        sys.exit(2)
+
     device = select_device(args.device)
     model = load_checkpoint_model(args.checkpoint, device)
 
@@ -316,8 +325,31 @@ def main() -> None:
     _write_csv(output_dir / "per_action_metrics.csv", result["action_rows"])
     _write_csv(output_dir / "per_environment_metrics.csv", result["environment_rows"])
 
+    # --- pose visualization (optional, separate pass) ---
+    if args.pose_viz:
+        from evaluation.pose_viz import run_pose_visualization
+
+        print("\n--- Pose Joint Scatter Visualization ---")
+        viz_dataset = MemmapDataset(
+            data_dir=args.dataset_root,
+            split="all",
+            envs=eval_envs,
+        )
+        run_pose_visualization(
+            model=model,
+            dataset=viz_dataset,
+            device=device,
+            output_dir=output_dir,
+            output_format=args.output_format,
+            figure_width=args.figure_width,
+            figure_height=args.figure_height,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+        )
+        print("Pose visualization complete.")
+
     # --- feature visualization (optional, separate pass) ---
-    if args.feature_viz:
+    elif args.feature_viz:
         from evaluation.feature_viz import run_feature_visualization
 
         print("\n--- Feature Visualization ---")
