@@ -111,8 +111,8 @@ class MemmapDataset(Dataset):
         few_shot_subjects: int,
         few_shot_frames: int,
     ) -> list[int]:
-        action_list = [str(a) for a in self._actions]
-        sample_list = [str(s) for s in self._samples]
+        action_list = [str(self._actions[i]) for i in self.indices]
+        sample_list = [str(self._samples[i]) for i in self.indices]
 
         unique_subjects = sorted(set(sample_list))
         selected_subjects = unique_subjects[:few_shot_subjects]
@@ -121,8 +121,8 @@ class MemmapDataset(Dataset):
         for subject in selected_subjects:
             for action in sorted(set(action_list)):
                 group = [
-                    i for i in range(len(self._actions))
-                    if sample_list[i] == subject and action_list[i] == action
+                    pos for pos in range(len(self.indices))
+                    if sample_list[pos] == subject and action_list[pos] == action
                 ]
                 if not group:
                     continue
