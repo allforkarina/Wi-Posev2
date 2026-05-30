@@ -1,14 +1,13 @@
-"""Pose joint scatter visualization for eval.py --pose-viz.
+"""Pose joint scatter + skeleton visualization for eval.py --pose-viz.
 
-Generates per-subject scatter plots comparing GT and predicted OpenPose18
-keypoints. Each joint gets a distinct color; no skeleton bones are drawn.
-Samples the middle frame (index 148) of each (action, subject) pair.
+Generates per-action figures: individual two-subplot (scatter + skeleton)
+files and a per-action NxM composite grid of skeleton overlays.
 """
 
 from __future__ import annotations
 
-import re
 from collections import defaultdict
+from math import ceil
 from pathlib import Path
 
 import matplotlib
@@ -33,6 +32,15 @@ JOINT_COLORS = [
     "#E6194B", "#3CB44B", "#FFE119", "#4363D8", "#F58231", "#911EB4",
     "#46F0F0", "#F032E6", "#BCF60C", "#FABEBE", "#008080", "#E6BEFF",
     "#9A6324", "#FFFAC8", "#800000", "#AAFFC3", "#808000", "#FFD8B1",
+]
+
+BONE_EDGES: list[tuple[int, int]] = [
+    (4, 7), (7, 3),
+    (3, 9), (3, 6), (3, 11),
+    (9, 13), (13, 10), (11, 8), (8, 12),
+    (6, 0),
+    (0, 15), (0, 16),
+    (15, 14), (14, 17), (16, 5), (5, 1), (1, 2),
 ]
 
 plt.rcParams.update({
@@ -82,37 +90,27 @@ def _collect_middle_frames(dataset: MemmapDataset) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
-# Scatter plot drawing
+# Axis-level drawing
 # ---------------------------------------------------------------------------
 
-def _draw_pose_scatter(
-    target: np.ndarray,       # [18, 2]
-    prediction: np.ndarray,   # [18, 2]
-    action: str,
-    subject: str,
-    environment: str,
-    output_dir: Path,
-    output_format: str,
-    figure_width: float | None,
-    figure_height: float | None,
-) -> None:
-    """Draw and save a single joint scatter plot (Clean Modern style)."""
-    fig_w = figure_width or 8.0
-    fig_h = figure_height or 8.0
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-
-    # --- axis limits with 10% padding ---
+def _compute_axes_limits(
+    target: np.ndarray,
+    prediction: np.ndarray,
+    pad_ratio: float = 0.1,
+    min_pad: float = 0.02,
+) -> tuple[float, float, float, float]:
+    """Return (x_min, x_max, y_min, y_max) with padding."""
     all_points = np.concatenate([target, prediction], axis=0)
-    x_min, x_max = all_points[:, 0].min(), all_points[:, 0].max()
-    y_min, y_max = all_points[:, 1].min(), all_points[:, 1].max()
-    x_pad = max((x_max - x_min) * 0.1, 0.02)
-    y_pad = max((y_max - y_min) * 0.1, 0.02)
+    x_min, x_max = float(all_points[:, 0].min()), float(all_points[:, 0].max())
+    y_min, y_max = float(all_points[:, 1].min()), float(all_points[:, 1].max())
+    x_pad = max((x_max - x_min) * pad_ratio, min_pad)
+    y_pad = max((y_max - y_min) * pad_ratio, min_pad)
+    return x_min - x_pad, x_max + x_pad, y_min - y_pad, y_max + y_pad
 
-    # --- background grid ---
-    ax.set_facecolor("#ffffff")
-    ax.grid(True, alpha=0.3, color="#e8e8e8", linewidth=0.5)
 
-    # --- error vectors: thin gray dashed ---
+def _draw_scatter(ax: plt.Axes, target: np.ndarray, prediction: np.ndarray) -> None:
+    """Draw GT (hollow) and prediction (filled) joint scatter on *ax*."""
+    # error vectors
     for j in range(18):
         ax.plot(
             [target[j, 0], prediction[j, 0]],
@@ -120,17 +118,17 @@ def _draw_pose_scatter(
             color="#cccccc", linewidth=0.5, linestyle="--", zorder=1,
         )
 
-    # --- GT: dashed hollow circles ---
+    # GT: dashed hollow circles
     for j in range(18):
         ax.scatter(
             target[j, 0], target[j, 1],
             facecolors="none",
             edgecolors=JOINT_COLORS[j],
             marker="o", s=80, linewidths=1.8,
-            linestyle="--", zorder=3,
+            zorder=3,
         )
 
-    # --- Prediction: filled circles with dark border ---
+    # Prediction: filled circles with dark border
     for j in range(18):
         ax.scatter(
             prediction[j, 0], prediction[j, 1],
@@ -138,7 +136,6 @@ def _draw_pose_scatter(
             edgecolors="#333333",
             marker="o", s=80, linewidths=1.0, zorder=2,
         )
-        # joint index label
         ax.annotate(
             str(j),
             (prediction[j, 0], prediction[j, 1]),
@@ -146,7 +143,7 @@ def _draw_pose_scatter(
             xytext=(8, -8), textcoords="offset points",
         )
 
-    # --- legend ---
+    # legend
     legend_elements = [
         Line2D([0], [0], marker="o", color="w", markerfacecolor="none",
                markeredgecolor="#888888", markersize=8, markeredgewidth=1.8,
@@ -156,34 +153,196 @@ def _draw_pose_scatter(
     ]
     ax.legend(handles=legend_elements, loc="upper right", fontsize=9)
 
-    ax.set_xlim(x_min - x_pad, x_max + x_pad)
-    ax.set_ylim(y_max + y_pad, y_min - y_pad)  # invert for natural pose
-    ax.set_aspect("equal")
-    ax.set_xlabel("Normalized X")
-    ax.set_ylabel("Normalized Y")
-    ax.set_title(
-        f"Joint Prediction vs GT — {action} / {subject} / {environment}",
-        fontsize=12, fontweight="bold",
+
+def _draw_skeleton(
+    ax: plt.Axes,
+    keypoints: np.ndarray,
+    *,
+    hollow: bool = False,
+    bone_linestyle: str = "-",
+    bone_color: str = "#333333",
+    bone_linewidth: float = 1.2,
+    marker_size: float = 60,
+    base_zorder: int = 1,
+) -> None:
+    """Draw skeleton bones and joint circles for one set of keypoints.
+
+    Parameters
+    ----------
+    hollow : bool
+        If True, joint circles are hollow (GT style); otherwise filled (Pred style).
+    """
+    # bones
+    for i, j in BONE_EDGES:
+        ax.plot(
+            [keypoints[i, 0], keypoints[j, 0]],
+            [keypoints[i, 1], keypoints[j, 1]],
+            color=bone_color, linestyle=bone_linestyle,
+            linewidth=bone_linewidth, alpha=0.7, zorder=base_zorder,
+        )
+
+    # joints
+    for j in range(18):
+        if hollow:
+            ax.scatter(
+                keypoints[j, 0], keypoints[j, 1],
+                facecolors="none",
+                edgecolors=JOINT_COLORS[j],
+                marker="o", s=marker_size, linewidths=1.5,
+                zorder=base_zorder + 1,
+            )
+        else:
+            ax.scatter(
+                keypoints[j, 0], keypoints[j, 1],
+                facecolors=JOINT_COLORS[j],
+                edgecolors="#333333",
+                marker="o", s=marker_size, linewidths=1.0,
+                zorder=base_zorder + 1,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Figure-level
+# ---------------------------------------------------------------------------
+
+def _save_individual(
+    target: np.ndarray,
+    prediction: np.ndarray,
+    action: str,
+    subject: str,
+    environment: str,
+    output_dir: Path,
+    figure_width: float | None,
+    figure_height: float | None,
+) -> None:
+    """Save a two-subplot figure: scatter (left) + skeleton (right)."""
+    fig_w = figure_width or 14.0
+    fig_h = figure_height or 6.5
+    fig, (ax_scatter, ax_skeleton) = plt.subplots(1, 2, figsize=(fig_w, fig_h))
+
+    # --- common axis limits ---
+    x_min, x_max, y_min, y_max = _compute_axes_limits(target, prediction)
+
+    # --- left: scatter ---
+    ax_scatter.set_facecolor("#ffffff")
+    ax_scatter.grid(True, alpha=0.3, color="#e8e8e8", linewidth=0.5)
+    _draw_scatter(ax_scatter, target, prediction)
+    ax_scatter.set_xlim(x_min, x_max)
+    ax_scatter.set_ylim(y_max, y_min)  # invert Y for natural pose
+    ax_scatter.set_aspect("equal")
+    ax_scatter.set_xlabel("Normalized X")
+    ax_scatter.set_ylabel("Normalized Y")
+    ax_scatter.set_title("Joint Scatter (GT vs Pred)", fontsize=11, fontweight="bold")
+
+    # --- right: skeleton ---
+    ax_skeleton.set_facecolor("#fafafa")
+    ax_skeleton.grid(True, alpha=0.2, color="#d0d0d0", linewidth=0.5)
+    _draw_skeleton(ax_skeleton, target,
+                   hollow=True, bone_linestyle="--", bone_color="#aaaaaa",
+                   base_zorder=1)
+    _draw_skeleton(ax_skeleton, prediction,
+                   hollow=False, bone_linestyle="-", bone_color="#333333",
+                   base_zorder=3)
+    ax_skeleton.set_xlim(x_min, x_max)
+    ax_skeleton.set_ylim(y_max, y_min)
+    ax_skeleton.set_aspect("equal")
+    ax_skeleton.set_xlabel("Normalized X")
+    ax_skeleton.set_ylabel("Normalized Y")
+    ax_skeleton.set_title("Skeleton (GT vs Pred)", fontsize=11, fontweight="bold")
+
+    # skeleton legend
+    legend_elements = [
+        Line2D([0], [0], color="#aaaaaa", linestyle="--", linewidth=1.2, label="GT"),
+        Line2D([0], [0], color="#333333", linestyle="-", linewidth=1.2, label="Prediction"),
+    ]
+    ax_skeleton.legend(handles=legend_elements, loc="upper right", fontsize=9)
+
+    fig.suptitle(
+        f"{action} / {subject} / {environment}",
+        fontsize=13, fontweight="bold",
     )
+    fig.subplots_adjust(left=0.08, right=0.95, top=0.90, bottom=0.10, wspace=0.25)
 
-    fig.subplots_adjust(left=0.12, right=0.93, top=0.92, bottom=0.10)
-
-    # --- save ---
-    output_dir.mkdir(parents=True, exist_ok=True)
-    if output_format in ("pdf", "both"):
-        fig.savefig(str(output_dir / "fig_pose_scatter.pdf"), dpi=300)
-    if output_format in ("png", "both"):
-        fig.savefig(str(output_dir / "fig_pose_scatter.png"), dpi=300)
+    # save
+    action_dir = output_dir / action
+    action_dir.mkdir(parents=True, exist_ok=True)
+    safe_subject = subject.replace("/", "_").replace("\\", "_")
+    safe_env = environment.replace("/", "_").replace("\\", "_")
+    fig.savefig(str(action_dir / f"{safe_subject}_{safe_env}.png"), dpi=300)
     plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# Sanitize filename helper
-# ---------------------------------------------------------------------------
+def _build_action_composite(
+    action: str,
+    samples: list[dict],
+    output_dir: Path,
+) -> None:
+    """Build an N×M grid of skeleton overlays for all samples of *action*."""
+    n = len(samples)
+    if n == 0:
+        return
 
-def _sanitize_name(name: str) -> str:
-    """Replace characters unsafe for directory names with underscores."""
-    return re.sub(r"[^\w\-]", "_", name)
+    rows = int(ceil(n ** 0.5))
+    cols = int(ceil(n / rows))
+    cell_w = 4.5
+    cell_h = 4.5
+
+    fig, axes = plt.subplots(rows, cols, figsize=(cell_w * cols, cell_h * rows + 0.5))
+    if rows == 1 and cols == 1:
+        axes = np.array([[axes]])
+    elif rows == 1:
+        axes = axes.reshape(1, -1)
+    elif cols == 1:
+        axes = axes.reshape(-1, 1)
+
+    # global limits from all samples
+    all_points = np.concatenate(
+        [np.concatenate([s["target"], s["prediction"]], axis=0) for s in samples],
+        axis=0,
+    )
+    x_min, x_max = float(all_points[:, 0].min()), float(all_points[:, 0].max())
+    y_min, y_max = float(all_points[:, 1].min()), float(all_points[:, 1].max())
+    x_pad = max((x_max - x_min) * 0.1, 0.02)
+    y_pad = max((y_max - y_min) * 0.1, 0.02)
+    gx_min, gx_max = x_min - x_pad, x_max + x_pad
+    gy_min, gy_max = y_min - y_pad, y_max + y_pad
+
+    for idx, sample in enumerate(samples):
+        r, c = divmod(idx, cols)
+        ax = axes[r, c]
+        ax.set_facecolor("#fafafa")
+        ax.grid(True, alpha=0.15, color="#d0d0d0", linewidth=0.3)
+
+        _draw_skeleton(ax, sample["target"],
+                       hollow=True, bone_linestyle="--", bone_color="#aaaaaa",
+                       bone_linewidth=0.8, marker_size=25, base_zorder=1)
+        _draw_skeleton(ax, sample["prediction"],
+                       hollow=False, bone_linestyle="-", bone_color="#333333",
+                       bone_linewidth=0.8, marker_size=25, base_zorder=3)
+
+        ax.set_xlim(gx_min, gx_max)
+        ax.set_ylim(gy_max, gy_min)
+        ax.set_aspect("equal")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(f"{sample['subject']} / {sample['environment']}",
+                     fontsize=8, fontweight="bold")
+
+    # hide unused cells
+    for idx in range(n, rows * cols):
+        r, c = divmod(idx, cols)
+        axes[r, c].axis("off")
+
+    fig.suptitle(
+        f"Action: {action}  ({n} subjects)",
+        fontsize=14, fontweight="bold",
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+    action_dir = output_dir / action
+    action_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(action_dir / "_composite.png"), dpi=300)
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -196,13 +355,12 @@ def run_pose_visualization(
     dataset: MemmapDataset,
     device: torch.device,
     output_dir: Path,
-    output_format: str = "both",
     figure_width: float | None = None,
     figure_height: float | None = None,
     batch_size: int = 64,
     num_workers: int = 0,
 ) -> None:
-    """Orchestrate pose joint scatter visualization.
+    """Orchestrate pose joint scatter + skeleton visualization.
 
     Parameters
     ----------
@@ -213,8 +371,6 @@ def run_pose_visualization(
     device : torch.device
     output_dir : Path
         Base output directory; ``pose_viz/`` is created underneath.
-    output_format : str
-        ``"png"``, ``"pdf"``, or ``"both"`` (default).
     figure_width : float | None
     figure_height : float | None
     batch_size : int
@@ -244,7 +400,8 @@ def run_pose_visualization(
         persistent_workers=num_workers > 0,
     )
 
-    print("  Running inference and saving scatter plots...")
+    print("  Running inference and saving figures...")
+    action_samples: dict[str, list[dict]] = defaultdict(list)
     sample_idx = 0
     with torch.no_grad():
         for batch in loader:
@@ -256,22 +413,29 @@ def run_pose_visualization(
                 action = str(batch["action"][i])
                 subject = str(batch["sample"][i])
                 environment = str(batch["environment"][i])
-                sample_dir = viz_dir / (
-                    f"{_sanitize_name(action)}_"
-                    f"{_sanitize_name(environment)}_"
-                    f"{_sanitize_name(subject)}"
-                )
-                _draw_pose_scatter(
+
+                _save_individual(
                     target=targets_np[i],
                     prediction=preds[i],
                     action=action,
                     subject=subject,
                     environment=environment,
-                    output_dir=sample_dir,
-                    output_format=output_format,
+                    output_dir=viz_dir,
                     figure_width=figure_width,
                     figure_height=figure_height,
                 )
+                action_samples[action].append({
+                    "target": targets_np[i],
+                    "prediction": preds[i],
+                    "subject": subject,
+                    "environment": environment,
+                })
                 sample_idx += 1
 
-    print(f"  Saved {sample_idx} scatter plots to {viz_dir}")
+    # --- per-action composites ---
+    print(f"  Building per-action composite figures ({len(action_samples)} actions)...")
+    for action in sorted(action_samples):
+        _build_action_composite(action, action_samples[action], viz_dir)
+
+    print(f"  Saved {sample_idx} individual figures + "
+          f"{len(action_samples)} composites to {viz_dir}")

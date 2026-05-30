@@ -407,7 +407,6 @@ def main() -> None:
             dataset=viz_dataset,
             device=device,
             output_dir=output_dir,
-            output_format=args.output_format,
             figure_width=args.figure_width,
             figure_height=args.figure_height,
             batch_size=args.batch_size,

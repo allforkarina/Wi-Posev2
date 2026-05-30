@@ -11,6 +11,7 @@
 - `evaluation/`: Evaluation pipeline package.
   - `evaluation/hooks.py`: Forward hook context manager (`WiFlowHookContext`, `wiflow_hooks`) for non-invasive intermediate feature extraction from WiFlow submodules.
   - `evaluation/feature_viz.py`: Orchestrator and figure-drawing functions for research-grade feature visualization (antenna channel response, resblock PCA trajectory, axial attention maps, joint query t-SNE, feature-pose correlation).
+  - `evaluation/pose_viz.py`: Per-action joint scatter + skeleton visualization with custom bone edges, two-subplot individual figures, and N×M grid per-action composites.
 - `scripts/`: Preprocessing and diagnostic utilities.
   - `scripts/build_memmap.py`: Command-line wrapper that builds an NPY memmap dataset from the raw MM-Fi directory structure.
   - `scripts/build_groundtruth.py`: Builds ground-truth keypoint statistics and visualizations.
