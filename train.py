@@ -267,21 +267,38 @@ def select_device(device_name: str) -> torch.device:
 def apply_finetune_tier(model: nn.Module, tier: int = 1) -> int:
     trainable_params = 0
     if tier == 1:
-        for name, param in model.named_parameters():
-            keep = any(kw in name.lower() for kw in ("norm", "bn", "ln", "joint_queries", "coordinate_head"))
-            param.requires_grad = keep
-            if keep:
-                trainable_params += param.numel()
+        keep_kw = ("norm", "bn", "ln", "joint_queries", "coordinate_head")
     elif tier == 2:
-        for name, param in model.named_parameters():
-            keep = any(kw in name.lower() for kw in ("norm", "bn", "ln", "joint_queries", "coordinate_head", "decoder."))
-            param.requires_grad = keep
-            if keep:
-                trainable_params += param.numel()
+        keep_kw = ("norm", "bn", "ln", "joint_queries", "coordinate_head", "decoder.")
+    elif tier == 3:
+        keep_kw = ("norm", "bn", "ln", "joint_queries", "coordinate_head", "decoder.",
+                   "spatial_attention.")
+    elif tier == 4:
+        keep_kw = ("norm", "bn", "ln", "joint_queries", "coordinate_head", "decoder.",
+                   "spatial_attention.", "temporal_attention.")
+    elif tier == 5:
+        keep_kw = ("norm", "bn", "ln", "joint_queries", "coordinate_head", "decoder.",
+                   "spatial_attention.", "temporal_attention.", "channel_projection")
+    elif tier == 6:
+        for param in model.parameters():
+            param.requires_grad = True
+            trainable_params += param.numel()
+        total = sum(p.numel() for p in model.parameters())
+        print(f"Freeze tier {tier}: {trainable_params}/{total} parameters trainable "
+              f"({trainable_params / total * 100:.1f}%)")
+        return trainable_params
     else:
-        raise ValueError(f"Unknown freeze tier: {tier}")
+        raise ValueError(f"Unknown freeze tier: {tier}. Valid tiers: 1-6")
+
+    for name, param in model.named_parameters():
+        keep = any(kw in name.lower() for kw in keep_kw)
+        param.requires_grad = keep
+        if keep:
+            trainable_params += param.numel()
+
     total = sum(p.numel() for p in model.parameters())
-    print(f"Freeze tier {tier}: {trainable_params}/{total} parameters trainable ({trainable_params / total * 100:.1f}%)")
+    print(f"Freeze tier {tier}: {trainable_params}/{total} parameters trainable "
+          f"({trainable_params / total * 100:.1f}%)")
     return trainable_params
 
 
@@ -541,7 +558,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--few-shot-subjects", type=int, default=4)
     parser.add_argument("--few-shot-frames", type=int, default=5)
     parser.add_argument("--freeze-tier", type=int, default=1,
-                        help="Freeze tier 1 (norms + head only) or 2 (+ decoder).")
+                        help="Freeze tier: 1(norms+head) 2(+decoder) 3(+spatial_attn) "
+                             "4(+temporal_attn) 5(+channel_proj) 6(full)")
     return parser.parse_args()
 
 
