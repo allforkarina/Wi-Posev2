@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
+import textwrap
 from typing import Any
 
 import matplotlib
@@ -28,7 +29,6 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from torch.utils.data import DataLoader
 
-from dataloader import create_memmap_data_loader
 from evaluation.hooks import wiflow_hooks
 from models import NUM_OPENPOSE_KEYPOINTS, OPENPOSE_BONE_EDGES, WiFlowModel
 from train import extract_prediction_keypoints, prepare_model_input
@@ -58,9 +58,35 @@ _JOINT_NAMES = [
 ]
 
 _GLOBAL_SPACING = dict(
-    hspace=0.45, wspace=0.35,
-    left=0.07, right=0.93, top=0.92, bottom=0.06,
+    hspace=0.55, wspace=0.42,
+    left=0.07, right=0.93, top=0.82, bottom=0.16,
 )
+
+_FIGURE_GUIDES = {
+    "fig1": (
+        "What this shows: raw three-antenna CSI amplitude before and after the learned antenna mixer. "
+        "Use it to check whether target-domain fine-tuning recalibrates environment-specific antenna responses."
+    ),
+    "fig2": (
+        "What this shows: how CSI is compressed through residual time-frequency blocks. "
+        "Top row is PCA-compressed feature texture; bottom row is channel activation variance. "
+        "Better domain alignment should produce cleaner stage trajectories and less collapsed variance."
+    ),
+    "fig3": (
+        "What this shows: spatial-token and temporal-token attention. "
+        "Rows separate subcarrier/spatial selection from temporal selection; brighter cells indicate stronger attention. "
+        "Use this to argue whether encoder fine-tuning selects more pose-relevant CSI regions."
+    ),
+    "fig4": (
+        "What this shows: decoder joint-query structure. "
+        "t-SNE panels show whether anatomical groups separate; cosine panels show query similarity between joints. "
+        "For encoder-only fine-tuning, this should remain stable if decoder priors are preserved."
+    ),
+    "fig6": (
+        "What this shows: Pearson correlation between encoder tokens and each OpenPose18 joint coordinate. "
+        "Stronger localized absolute correlation after fine-tuning supports better alignment between CSI features and pose targets."
+    ),
+}
 
 plt.rcParams.update({
     "font.family": FONT_FAMILY,
@@ -76,8 +102,33 @@ plt.rcParams.update({
 })
 
 
-def _apply_spacing(fig: plt.Figure) -> None:
-    fig.subplots_adjust(**_GLOBAL_SPACING)
+def _figure_size(default_width: float, default_height: float) -> tuple[float, float]:
+    return (_FIGURE_WIDTH or default_width, _FIGURE_HEIGHT or default_height)
+
+
+def _apply_spacing(fig: plt.Figure, **overrides: float) -> None:
+    spacing = dict(_GLOBAL_SPACING)
+    spacing.update(overrides)
+    fig.subplots_adjust(**spacing)
+
+
+def _set_figure_context(
+    fig: plt.Figure,
+    title: str,
+    subtitle: str,
+    guide: str,
+) -> None:
+    fig.suptitle(title, fontsize=15, fontweight="bold", y=0.985)
+    fig.text(
+        0.5, 0.945, subtitle,
+        ha="center", va="top", fontsize=10, color="#333333",
+    )
+    fig.text(
+        0.01, 0.025,
+        textwrap.fill(guide, width=170),
+        ha="left", va="bottom", fontsize=9, color="#222222",
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="#F7F7F7", edgecolor="#D9D9D9"),
+    )
 
 
 _OUTPUT_FORMAT = "both"
@@ -196,7 +247,7 @@ def _fig1_antenna_channel(
 
     # Weight-clip axis labels removed per spec (no "weight-clip" info)
 
-    fig, axes = plt.subplots(1, 7, figsize=(18, 4))
+    fig, axes = plt.subplots(1, 7, figsize=_figure_size(20, 6.2))
 
     # --- symmetric vmin/vmax per group ---
     inp_abs = np.abs(csi)
@@ -254,12 +305,13 @@ def _fig1_antenna_channel(
     if im_last is not None:
         _add_colorbar(im_last, axes[6], label="amplitude")
 
-    fig.suptitle(
-        f"Antenna Channel Response Analysis — "
-        f"{sample['action']} / {sample['environment']}",
-        fontsize=14, fontweight="bold",
+    _set_figure_context(
+        fig,
+        "Fig 1. Antenna Channel Response Analysis",
+        f"Sample: action={sample['action']} | environment={sample['environment']} | frame={sample['frame_idx']}",
+        _FIGURE_GUIDES["fig1"],
     )
-    _apply_spacing(fig)
+    _apply_spacing(fig, top=0.79, bottom=0.20)
     _save_fig(fig, output_dir / "fig1_antenna_channel")
 
 
@@ -275,7 +327,7 @@ def _fig2_downsampling_trajectory(
 ) -> None:
     """2×4 grid.  Row 1: PCA RGB of first 8 channels.  Row 2: channel variance."""
     csi = sample["model_input"][0].cpu().numpy()  # [3, 114, 64]
-    csi_img = csi.mean(axis=0)  # [114, 64]
+    csi_img = csi.mean(axis=0).T  # [64, 114] = [time, subcarrier]
 
     stage_keys = [
         "spatial_encoder.resblock1",
@@ -289,11 +341,11 @@ def _fig2_downsampling_trajectory(
     ]
     stage_colors = ["#534AB7", "#1D9E75", "#D85A30"]
 
-    fig, axes = plt.subplots(2, 4, figsize=(18, 6))
+    fig, axes = plt.subplots(2, 4, figsize=_figure_size(20, 8.0))
 
     # --- column 0: original CSI ---
     axes[0, 0].imshow(csi_img, aspect="auto", cmap="jet", origin="lower")
-    axes[0, 0].set_title("CSI Input (mean ant)\n[3, 114, 64]", fontsize=11)
+    axes[0, 0].set_title("CSI input (mean antenna)\n[time, subcarrier]", fontsize=11)
     axes[0, 0].set_xlabel("subcarrier axis")
     axes[0, 0].set_ylabel("time axis")
     axes[1, 0].axis("off")
@@ -333,12 +385,13 @@ def _fig2_downsampling_trajectory(
         if col == 1:
             axes[1, col].set_ylabel("count")
 
-    fig.suptitle(
-        f"Symmetric Downsampling Trajectory — "
-        f"{sample['action']} / {sample['environment']}",
-        fontsize=14, fontweight="bold",
+    _set_figure_context(
+        fig,
+        "Fig 2. Symmetric Downsampling Trajectory",
+        f"Sample: action={sample['action']} | environment={sample['environment']} | frame={sample['frame_idx']}",
+        _FIGURE_GUIDES["fig2"],
     )
-    _apply_spacing(fig)
+    _apply_spacing(fig, top=0.80, bottom=0.18)
     _save_fig(fig, output_dir / "fig2_downsampling_trajectory")
 
 
@@ -362,9 +415,7 @@ def _fig3_axial_attention(
         print(f"    [WARN] No attention weights captured for {sample['sample_id']}")
         return
 
-    fig, axes = plt.subplots(2, 5, figsize=(18, 8))
-    row_colors = ["Blues", "Oranges"]
-
+    fig, axes = plt.subplots(2, 5, figsize=_figure_size(20, 9.5))
     for row_idx, (weights, label, n_tokens) in enumerate([
         (sp_weights, "Spatial", 29),
         (tp_weights, "Temporal", 16),
@@ -403,6 +454,7 @@ def _fig3_axial_attention(
             title=f"{label} attn (avg {max(num_heads, 1)} heads)",
             token_label="subcarrier token" if label == "Spatial" else "time token",
             n=n_tokens,
+            show_colorbar=True,
         )
 
         # columns 1–4: individual heads (up to 4); skip if averaged
@@ -413,17 +465,20 @@ def _fig3_axial_attention(
                     title=f"{label} head {h + 1}",
                     token_label="subcarrier token" if label == "Spatial" else "time token",
                     n=n_tokens,
+                    show_colorbar=False,
                 )
 
         # hide unused head columns
         for h in range(num_heads if num_heads > 0 else 1, 4):
             axes[row_idx, 1 + h].axis("off")
 
-    fig.suptitle(
-        f"Axial Attention Maps — {sample['action']} / {sample['environment']}",
-        fontsize=14, fontweight="bold",
+    _set_figure_context(
+        fig,
+        "Fig 3. Axial Attention Maps",
+        f"Sample: action={sample['action']} | environment={sample['environment']} | frame={sample['frame_idx']}",
+        _FIGURE_GUIDES["fig3"],
     )
-    _apply_spacing(fig)
+    _apply_spacing(fig, top=0.80, bottom=0.18)
     _save_fig(fig, output_dir / "fig3_axial_attention")
 
 
@@ -433,6 +488,7 @@ def _draw_attn_panel(
     title: str,
     token_label: str,
     n: int,
+    show_colorbar: bool = True,
 ) -> None:
     """Draw one attention matrix + entropy bar on a panel."""
     if matrix.ndim != 2:
@@ -454,8 +510,8 @@ def _draw_attn_panel(
     if matrix.shape[0] == matrix.shape[1]:
         ax.axline((0, 0), (1, 1), color="white", linestyle="--", linewidth=0.8)
 
-    # colorbar
-    _add_colorbar(im, ax, label="attn weight")
+    if show_colorbar:
+        _add_colorbar(im, ax, label="attn weight")
 
 
 # ---------------------------------------------------------------------------
@@ -485,7 +541,7 @@ def _fig4_joint_query_trajectory(
         return
 
     ncols = L + 1  # +1 for legend/annotation column
-    fig, axes = plt.subplots(2, ncols, figsize=(18, 10))
+    fig, axes = plt.subplots(2, ncols, figsize=_figure_size(20, 11.0))
 
     # --- t-SNE ---
     all_q = np.concatenate(layer_queries, axis=0)  # [18*L, 256]
@@ -547,16 +603,18 @@ def _fig4_joint_query_trajectory(
     # last column of row 2: hide
     axes[1, -1].axis("off")
 
-    fig.suptitle(
-        f"Joint Query Trajectory — {sample['action']} / {sample['environment']}",
-        fontsize=14, fontweight="bold",
+    _set_figure_context(
+        fig,
+        "Fig 4. Joint Query Trajectory",
+        f"Sample: action={sample['action']} | environment={sample['environment']} | frame={sample['frame_idx']}",
+        _FIGURE_GUIDES["fig4"],
     )
-    _apply_spacing(fig)
+    _apply_spacing(fig, top=0.80, bottom=0.17)
     _save_fig(fig, output_dir / "fig4_joint_query_trajectory")
 
 
 # ---------------------------------------------------------------------------
-# Figure 6: Feature-Pose Correlation Landscape (global)
+# Figure 5: Feature-Pose Correlation Landscape (global)
 # ---------------------------------------------------------------------------
 
 
@@ -568,8 +626,8 @@ def _fig6_global_correlation(
 ) -> None:
     """6×3 grid: Pearson r between encoder features and joint coordinates.
 
-    Collects the whole test set — one pass.  Uses a separate DataLoader to
-    avoid interfering with the per-sample visualization pass.
+    Collects the same evaluation loader used by ``--feature-viz`` so env
+    filtering and few-shot exclusions stay consistent with the metric pass.
     """
     all_features: list[np.ndarray] = []
     all_keypoints: list[np.ndarray] = []
@@ -595,7 +653,7 @@ def _fig6_global_correlation(
     # mean pool over 256 channels → [N, 29, 16]
     feat_pooled = features.mean(axis=1)
 
-    fig, axes = plt.subplots(6, 3, figsize=(18, 12))
+    fig, axes = plt.subplots(6, 3, figsize=_figure_size(20, 15.0))
     axes = axes.flatten()
 
     # anatomical group borders
@@ -636,8 +694,16 @@ def _fig6_global_correlation(
         if j % 3 == 0:
             ax.set_ylabel("subcarrier token")
 
+    _set_figure_context(
+        fig,
+        "Fig 5. Feature-Pose Correlation Landscape",
+        "Global view over the same evaluation loader used by --feature-viz.",
+        _FIGURE_GUIDES["fig6"],
+    )
+    _apply_spacing(fig, top=0.87, bottom=0.13, right=0.91, hspace=0.62)
+
     # shared colorbar
-    cbar_ax = fig.add_axes([0.94, 0.08, 0.012, 0.84])
+    cbar_ax = fig.add_axes([0.94, 0.16, 0.012, 0.67])
     cbar = fig.colorbar(im, cax=cbar_ax)
     cbar.set_label("Pearson r", fontsize=8)
     cbar.ax.tick_params(labelsize=8)
@@ -660,11 +726,6 @@ def _fig6_global_correlation(
         )
         fig.patches.append(rect)
 
-    fig.suptitle("Feature-Pose Correlation Landscape (Encoder Output \u00d7 Joint Coordinates)",
-                 fontsize=14, fontweight="bold")
-    _apply_spacing(fig)
-    # Adjust right margin for shared colorbar
-    fig.subplots_adjust(right=0.93)
     _save_fig(fig, output_dir / "_global" / "fig6_feature_pose_correlation")
 
 
@@ -718,17 +779,17 @@ def _build_overview(
         print("    [INFO] PIL not installed — skipping overview composite")
         return
 
-    fig_names = [
-        "fig1_antenna_channel",
-        "fig2_downsampling_trajectory",
-        "fig3_axial_attention",
-        "fig4_joint_query_trajectory",
-        "fig6_feature_pose_correlation",
+    fig_specs = [
+        ("fig1_antenna_channel", "Fig 1. Antenna response"),
+        ("fig2_downsampling_trajectory", "Fig 2. Downsampling trajectory"),
+        ("fig3_axial_attention", "Fig 3. Axial attention"),
+        ("fig4_joint_query_trajectory", "Fig 4. Joint queries"),
+        ("fig6_feature_pose_correlation", "Fig 5. Feature-pose correlation"),
     ]
 
     # Collect thumbnail paths
     thumb_paths: list[Path | None] = []
-    for name in fig_names:
+    for name, _ in fig_specs:
         if "fig6" in name:
             p = output_dir / "_global" / f"{name}.png"
             thumb_paths.append(p if p.exists() else None)
@@ -783,11 +844,16 @@ def _build_overview(
             ax.axis("off")
             continue
         ax.imshow(thumb_imgs[idx], aspect="auto")
-        ax.set_title(f"Fig {idx + 1}", fontsize=12, fontweight="bold", loc="left")
+        ax.set_title(fig_specs[idx][1], fontsize=12, fontweight="bold", loc="left")
         ax.axis("off")
 
-    fig.suptitle("Feature Visualization Overview", fontsize=14, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.suptitle("Feature Visualization Overview", fontsize=15, fontweight="bold")
+    fig.text(
+        0.5, 0.94,
+        "Read left-to-right: CSI channel calibration, encoder compression, axial selection, decoder query structure, then global feature-pose alignment.",
+        ha="center", va="top", fontsize=10, color="#333333",
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.90])
     _save_fig(fig, output_dir / "overview")
 
 
@@ -897,17 +963,17 @@ def run_feature_visualization(
     figure_width: float | None = None,
     figure_height: float | None = None,
 ) -> None:
-    """Orchestrate all 6 feature visualization figures.
+    """Orchestrate feature visualization figures.
 
     Parameters
     ----------
     model : WiFlowModel
         Trained model in eval mode.
     loader : DataLoader
-        Test DataLoader (will be consumed once for sampling, then a fresh
-        loader is created internally for the global correlation pass).
+        Test DataLoader. The same loader is reused for sampling and global
+        correlation so evaluation filters remain consistent.
     dataset_root : str
-        Path to the NPY memmap dataset directory (for creating fresh loader).
+        Retained for eval.py API compatibility.
     output_dir : Path
         Base output directory; ``feature_viz/`` is created underneath.
     device : torch.device
@@ -916,9 +982,9 @@ def run_feature_visualization(
     num_action_samples : int
         Samples per action type (default 3).
     batch_size : int
-        Batch size for the fresh correlation loader.
+        Retained for eval.py API compatibility.
     num_workers : int
-        Number of data loader workers.
+        Retained for eval.py API compatibility.
     output_format : str
         ``"png"``, ``"pdf"``, or ``"both"`` (default).
     figure_width : float | None
@@ -1007,20 +1073,11 @@ def run_feature_visualization(
         device=device,
     )
 
-    # --- Global figure 6 ---
-    # Create a fresh loader for the one-pass correlation collection
-    print("  Computing global feature-pose correlation (one pass over test set)...")
-    global_loader = create_memmap_data_loader(
-        data_dir=dataset_root,
-        split="test",
-        batch_size=batch_size,
-        num_workers=num_workers,
-        shuffle=False,
-    )
-
+    # --- Global correlation figure ---
+    print("  Computing global feature-pose correlation (one pass over evaluation loader)...")
     global_dir = viz_dir / "_global"
     global_dir.mkdir(parents=True, exist_ok=True)
-    _fig6_global_correlation(model, global_loader, device, viz_dir)
+    _fig6_global_correlation(model, loader, device, viz_dir)
 
     # --- Overview ---
     print("  Building overview composite...")
