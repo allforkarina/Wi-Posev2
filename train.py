@@ -22,6 +22,30 @@ from models import AXIAL_ENCODER_MODES, DECODER_TYPES, OPENPOSE_BONE_EDGES, WiFl
 PCK_THRESHOLDS: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5)
 RIGHT_SHOULDER_INDEX = 2
 LEFT_HIP_INDEX = 11
+TRAINABLE_GROUPS: tuple[str, ...] = (
+    "encoder",
+    "decoder",
+    "full",
+    "spatial_encoder",
+    "axial_encoder",
+    "axial_attention",
+    "axial_projection",
+    "decoder_queries",
+    "decoder_attention",
+    "decoder_head",
+    "decoder_norms",
+    "norms",
+)
+NORMALIZATION_MODULES = (
+    nn.BatchNorm1d,
+    nn.BatchNorm2d,
+    nn.BatchNorm3d,
+    nn.InstanceNorm1d,
+    nn.InstanceNorm2d,
+    nn.InstanceNorm3d,
+    nn.GroupNorm,
+    nn.LayerNorm,
+)
 
 
 @dataclass(frozen=True)
@@ -47,7 +71,8 @@ class TrainConfig:
     finetune_from: str | None = None
     few_shot_subjects: int = 4
     few_shot_frames: int = 5
-    freeze_tier: int = 1
+    trainable_groups: tuple[str, ...] = ("encoder",)
+    freeze_tier: int | None = None
 
 
 def prepare_model_input(
@@ -264,6 +289,92 @@ def select_device(device_name: str) -> torch.device:
     return torch.device(device_name)
 
 
+def _normalization_parameter_names(model: nn.Module) -> set[str]:
+    names: set[str] = set()
+    for module_name, module in model.named_modules():
+        if not isinstance(module, NORMALIZATION_MODULES):
+            continue
+        for param_name, _ in module.named_parameters(recurse=False):
+            names.add(f"{module_name}.{param_name}" if module_name else param_name)
+    return names
+
+
+def _matches_trainable_group(
+    name: str,
+    group: str,
+    norm_param_names: set[str],
+) -> bool:
+    if group == "encoder":
+        return name.startswith(("spatial_encoder.", "axial_encoder."))
+    if group == "decoder":
+        return name.startswith("decoder.")
+    if group == "full":
+        return True
+    if group == "spatial_encoder":
+        return name.startswith("spatial_encoder.")
+    if group == "axial_encoder":
+        return name.startswith("axial_encoder.")
+    if group == "axial_attention":
+        return name.startswith((
+            "axial_encoder.spatial_attention.",
+            "axial_encoder.temporal_attention.",
+            "axial_encoder.spatial_norm.",
+            "axial_encoder.temporal_norm.",
+        ))
+    if group == "axial_projection":
+        return name.startswith((
+            "axial_encoder.channel_projection.",
+            "axial_encoder.concat_projection.",
+        ))
+    if group == "decoder_queries":
+        return name.startswith("decoder.joint_queries")
+    if group == "decoder_attention":
+        return name.startswith((
+            "decoder.cross_attention_layers.",
+            "decoder.stages.",
+            "decoder.joint_attention.",
+        ))
+    if group == "decoder_head":
+        return name.startswith("decoder.coordinate_head.")
+    if group == "decoder_norms":
+        return name.startswith("decoder.") and name in norm_param_names
+    if group == "norms":
+        return name in norm_param_names
+    raise ValueError(f"Unknown trainable group: {group}")
+
+
+def apply_trainable_groups(model: nn.Module, groups: tuple[str, ...]) -> int:
+    if not groups:
+        raise ValueError(
+            f"At least one trainable group is required. Valid groups: {TRAINABLE_GROUPS}"
+        )
+
+    unknown = tuple(group for group in groups if group not in TRAINABLE_GROUPS)
+    if unknown:
+        raise ValueError(
+            f"Unknown trainable group(s): {unknown}. Valid groups: {TRAINABLE_GROUPS}"
+        )
+
+    selected = set(groups)
+    norm_param_names = _normalization_parameter_names(model)
+    trainable_params = 0
+    for name, param in model.named_parameters():
+        keep = any(
+            _matches_trainable_group(name, group, norm_param_names)
+            for group in selected
+        )
+        param.requires_grad = keep
+        if keep:
+            trainable_params += param.numel()
+
+    total = sum(p.numel() for p in model.parameters())
+    print(
+        f"Trainable groups {tuple(groups)}: {trainable_params}/{total} parameters trainable "
+        f"({trainable_params / total * 100:.1f}%)"
+    )
+    return trainable_params
+
+
 def apply_finetune_tier(model: nn.Module, tier: int = 1) -> int:
     trainable_params = 0
     if tier == 1:
@@ -459,7 +570,10 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         model.load_state_dict(checkpoint["model_state_dict"])
     else:
         model.load_state_dict(checkpoint)
-    apply_finetune_tier(model, tier=config.freeze_tier)
+    if config.freeze_tier is not None:
+        apply_finetune_tier(model, tier=config.freeze_tier)
+    else:
+        apply_trainable_groups(model, groups=config.trainable_groups)
 
     optimizer = AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -557,9 +671,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--finetune-from", default=None, help="Path to source checkpoint for finetune")
     parser.add_argument("--few-shot-subjects", type=int, default=4)
     parser.add_argument("--few-shot-frames", type=int, default=5)
-    parser.add_argument("--freeze-tier", type=int, default=1,
-                        help="Freeze tier: 1(norms+head) 2(+decoder) 3(+spatial_attn) "
-                             "4(+temporal_attn) 5(+channel_proj) 6(full)")
+    parser.add_argument(
+        "--trainable-groups",
+        nargs="+",
+        choices=TRAINABLE_GROUPS,
+        default=("encoder",),
+        help=(
+            "Parameter groups to train during finetune. Main ablations: encoder, "
+            "decoder, full. Fine-grained groups include spatial_encoder, "
+            "axial_encoder, axial_attention, axial_projection, decoder_queries, "
+            "decoder_attention, decoder_head, decoder_norms, norms."
+        ),
+    )
+    parser.add_argument(
+        "--freeze-tier",
+        type=int,
+        default=None,
+        help=(
+            "Deprecated compatibility option: cumulative freeze tier "
+            "1(norms+head) 2(+decoder) 3(+spatial_attn) 4(+temporal_attn) "
+            "5(+channel_proj) 6(full). Prefer --trainable-groups for ablations."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -570,6 +703,8 @@ def main() -> None:
         config_dict["source_envs"] = tuple(config_dict["source_envs"])
     if config_dict.get("target_envs") is not None:
         config_dict["target_envs"] = tuple(config_dict["target_envs"])
+    if config_dict.get("trainable_groups") is not None:
+        config_dict["trainable_groups"] = tuple(config_dict["trainable_groups"])
     field_names = {f.name for f in TrainConfig.__dataclass_fields__.values()}
     config = TrainConfig(**{k: v for k, v in config_dict.items() if k in field_names})
     run_training(config)

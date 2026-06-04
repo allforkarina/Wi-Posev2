@@ -28,8 +28,6 @@ outputs/
 *.pth
 *.ckpt
 
-# Test files (local only)
-tests/
 .idea/
 .vscode/
 .DS_Store
