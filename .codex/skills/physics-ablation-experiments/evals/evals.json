@@ -1,0 +1,23 @@
+{
+  "skill_name": "physics-ablation-experiments",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "我想给 WiFlow 加一个新的注意力模块并做消融，帮我设计实验、对照组、指标和最后论文里怎么解释。",
+      "expected_output": "Produces a physics-driven ablation matrix with a clear hypothesis, matched control, metrics, feature-visualization evidence, and write-up structure.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "当前模型有 --axial-mode spatial_then_temporal 和 temporal_then_spatial。我需要把这两个作为消融实验写清楚，避免只是报表格数字。",
+      "expected_output": "Frames axial order as a CSI spatial-frequency versus temporal-motion selection hypothesis, keeps controlled settings explicit, and proposes metric plus mechanism evidence.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "我准备比较 joint decoder 和 hierarchical decoder，想说明骨架先验为什么可能提升 CSI 姿态估计性能。",
+      "expected_output": "Connects decoder differences to OpenPose18 skeleton topology, suggests controlled training/evaluation commands, reports bone and per-joint metrics, and uses pose/feature visualization for interpretation.",
+      "files": []
+    }
+  ]
+}
