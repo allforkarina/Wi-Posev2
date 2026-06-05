@@ -152,6 +152,10 @@ def _add_colorbar(im, ax: plt.Axes, label: str = "") -> None:
         cbar.set_label(label, fontsize=8)
 
 
+def _as_axes_grid(axes: Any, n_rows: int, n_cols: int) -> np.ndarray:
+    return np.asarray(axes, dtype=object).reshape(n_rows, n_cols)
+
+
 def _group_for_joint(j: int) -> str:
     for name, indices in _ANATOMY_GROUPS.items():
         if j in indices:
@@ -918,8 +922,7 @@ def _build_action_composites(
             n_rows, n_cols,
             figsize=(panel_w * n_cols, panel_h * n_rows + 0.8),
         )
-        if n_cols == 1:
-            axes = axes.reshape(-1, 1)
+        axes = _as_axes_grid(axes, n_rows=n_rows, n_cols=n_cols)
 
         fig_types = [
             ("fig3_axial_attention", "Axial Attention"),
