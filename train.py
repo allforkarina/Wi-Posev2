@@ -62,6 +62,7 @@ class TrainConfig:
     grad_clip_norm: float = 1.0
     bone_loss_weight: float = 0.5
     latent_structure_loss_weight: float = 0.0
+    encoder_relation_loss_weight: float = 0.0
     num_workers: int = 4
     device: str = "cuda"
     seed: int = 42
@@ -155,12 +156,50 @@ def joint_latent_structure_loss(
     return F.smooth_l1_loss(latent_values, pose_values)
 
 
+def pose_feature_relation_loss(
+    encoder_features: torch.Tensor,
+    target: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    if encoder_features.ndim < 2:
+        raise ValueError("encoder_features must include batch and feature dimensions")
+    if target.ndim != 3 or target.shape[-1] != 2:
+        raise ValueError("target must be shaped [B, J, 2]")
+    if encoder_features.shape[0] != target.shape[0]:
+        raise ValueError(
+            "encoder_features and target must share batch dimension, "
+            f"got {tuple(encoder_features.shape)} and {tuple(target.shape)}"
+        )
+    if target.shape[0] < 2:
+        return encoder_features.sum() * 0.0
+
+    if encoder_features.ndim == 4:
+        feature_vector = encoder_features.mean(dim=(2, 3))
+    else:
+        feature_vector = encoder_features.flatten(1)
+    feature_vector = F.normalize(feature_vector, dim=-1, eps=eps)
+    feature_dist = 1.0 - torch.matmul(feature_vector, feature_vector.transpose(0, 1))
+
+    pose_vector = target.flatten(1)
+    pose_dist = torch.cdist(pose_vector, pose_vector, p=2)
+
+    batch_size = target.shape[0]
+    off_diagonal = ~torch.eye(batch_size, dtype=torch.bool, device=target.device)
+    feature_values = feature_dist[off_diagonal]
+    pose_values = pose_dist[off_diagonal]
+    feature_values = feature_values / feature_values.mean().clamp_min(eps)
+    pose_values = pose_values / pose_values.mean().clamp_min(eps)
+    return F.smooth_l1_loss(feature_values, pose_values)
+
+
 def compute_losses(
     prediction: torch.Tensor,
     target: torch.Tensor,
     bone_loss_weight: float = 0.5,
     decoder_features: torch.Tensor | None = None,
     latent_structure_loss_weight: float = 0.0,
+    encoder_features: torch.Tensor | None = None,
+    encoder_relation_loss_weight: float = 0.0,
 ) -> Dict[str, torch.Tensor]:
     coord = F.l1_loss(prediction, target)
     bone = bone_length_loss(prediction, target)
@@ -176,6 +215,12 @@ def compute_losses(
         latent_structure = joint_latent_structure_loss(decoder_features, target)
         losses["latent_structure_loss"] = latent_structure
         losses["loss"] = losses["loss"] + latent_structure_loss_weight * latent_structure
+    if encoder_relation_loss_weight > 0.0:
+        if encoder_features is None:
+            raise ValueError("encoder_features are required when encoder_relation_loss_weight > 0")
+        encoder_relation = pose_feature_relation_loss(encoder_features, target)
+        losses["encoder_relation_loss"] = encoder_relation
+        losses["loss"] = losses["loss"] + encoder_relation_loss_weight * encoder_relation
     return losses
 
 
@@ -229,10 +274,18 @@ def run_epoch(
         model_input, target = prepare_model_input(batch, device)
 
         with torch.set_grad_enabled(is_training):
-            output = model(
-                model_input,
-                return_decoder_features=criterion_config.latent_structure_loss_weight > 0.0,
-            )
+            encoder_features = None
+            if criterion_config.encoder_relation_loss_weight > 0.0:
+                encoder_features = model.encode_features(model_input)
+                output = model.decode_features(
+                    encoder_features,
+                    return_decoder_features=criterion_config.latent_structure_loss_weight > 0.0,
+                )
+            else:
+                output = model(
+                    model_input,
+                    return_decoder_features=criterion_config.latent_structure_loss_weight > 0.0,
+                )
             prediction, decoder_features = unpack_model_output(output)
             losses = compute_losses(
                 prediction,
@@ -240,6 +293,8 @@ def run_epoch(
                 bone_loss_weight=criterion_config.bone_loss_weight,
                 decoder_features=decoder_features,
                 latent_structure_loss_weight=criterion_config.latent_structure_loss_weight,
+                encoder_features=encoder_features,
+                encoder_relation_loss_weight=criterion_config.encoder_relation_loss_weight,
             )
             keypoint_prediction = extract_prediction_keypoints(prediction)
             metrics = compute_metrics(keypoint_prediction.detach(), target)
@@ -278,10 +333,18 @@ def run_finetune_epoch(
     for batch in loader:
         model_input, target = prepare_model_input(batch, device)
         optimizer.zero_grad(set_to_none=True)
-        output = model(
-            model_input,
-            return_decoder_features=criterion_config.latent_structure_loss_weight > 0.0,
-        )
+        encoder_features = None
+        if criterion_config.encoder_relation_loss_weight > 0.0:
+            encoder_features = model.encode_features(model_input)
+            output = model.decode_features(
+                encoder_features,
+                return_decoder_features=criterion_config.latent_structure_loss_weight > 0.0,
+            )
+        else:
+            output = model(
+                model_input,
+                return_decoder_features=criterion_config.latent_structure_loss_weight > 0.0,
+            )
         prediction, decoder_features = unpack_model_output(output)
         losses = compute_losses(
             prediction,
@@ -289,6 +352,8 @@ def run_finetune_epoch(
             bone_loss_weight=criterion_config.bone_loss_weight,
             decoder_features=decoder_features,
             latent_structure_loss_weight=criterion_config.latent_structure_loss_weight,
+            encoder_features=encoder_features,
+            encoder_relation_loss_weight=criterion_config.encoder_relation_loss_weight,
         )
         losses["loss"].backward()
         torch.nn.utils.clip_grad_norm_(
@@ -550,6 +615,7 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
             "axial_mode": config.axial_mode,
             "decoder_type": config.decoder_type,
             "latent_structure_loss_weight": config.latent_structure_loss_weight,
+            "encoder_relation_loss_weight": config.encoder_relation_loss_weight,
             "train_loss": train_metrics["loss"],
             "train_coord_loss": train_metrics["coord_loss"],
             "train_bone_loss": train_metrics["bone_loss"],
@@ -568,6 +634,10 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
             row["train_latent_structure_loss"] = train_metrics["latent_structure_loss"]
         if "latent_structure_loss" in val_metrics:
             row["val_latent_structure_loss"] = val_metrics["latent_structure_loss"]
+        if "encoder_relation_loss" in train_metrics:
+            row["train_encoder_relation_loss"] = train_metrics["encoder_relation_loss"]
+        if "encoder_relation_loss" in val_metrics:
+            row["val_encoder_relation_loss"] = val_metrics["encoder_relation_loss"]
         append_csv_row(log_path, row)
 
         save_checkpoint(
@@ -687,6 +757,7 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         row: Dict[str, float | int | str] = {
             "epoch": epoch,
             "latent_structure_loss_weight": config.latent_structure_loss_weight,
+            "encoder_relation_loss_weight": config.encoder_relation_loss_weight,
             "train_loss": train_metrics["loss"],
             "train_coord_loss": train_metrics["coord_loss"],
             "train_bone_loss": train_metrics["bone_loss"],
@@ -695,6 +766,8 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         }
         if "latent_structure_loss" in train_metrics:
             row["train_latent_structure_loss"] = train_metrics["latent_structure_loss"]
+        if "encoder_relation_loss" in train_metrics:
+            row["train_encoder_relation_loss"] = train_metrics["encoder_relation_loss"]
         append_csv_row(log_path, row)
 
         save_checkpoint(
@@ -749,6 +822,15 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help=(
             "Weight for decoder joint-latent pairwise structure loss. "
+            "Default 0 preserves the baseline coordinate and bone losses."
+        ),
+    )
+    parser.add_argument(
+        "--encoder-relation-loss-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for target-domain encoder feature relation loss. "
             "Default 0 preserves the baseline coordinate and bone losses."
         ),
     )

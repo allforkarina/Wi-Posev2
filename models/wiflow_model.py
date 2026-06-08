@@ -33,6 +33,12 @@ class WiFlowModel(nn.Module):
         elif decoder_type == "hierarchical":
             self.decoder = WiFlowHierarchicalJointDecoder()
 
+    def encode_features(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 4:
+            raise ValueError("WiFlowModel expects input shaped [B, 3, 114, 64]")
+        x = self.spatial_encoder(x)
+        return self.axial_encoder(x)
+
     def decode_features(
         self,
         x: torch.Tensor,
@@ -45,8 +51,5 @@ class WiFlowModel(nn.Module):
         x: torch.Tensor,
         return_decoder_features: bool = False,
     ):
-        if x.ndim != 4:
-            raise ValueError("WiFlowModel expects input shaped [B, 3, 114, 64]")
-        x = self.spatial_encoder(x)
-        x = self.axial_encoder(x)
+        x = self.encode_features(x)
         return self.decode_features(x, return_decoder_features=return_decoder_features)
