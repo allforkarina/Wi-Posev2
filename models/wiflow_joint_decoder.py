@@ -77,7 +77,11 @@ class WiFlowJointDecoder(nn.Module):
             raise ValueError("WiFlowJointDecoder expects input shaped [B, 256, 29, 16]")
         return x.flatten(2).transpose(1, 2)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_features: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         tokens = self.flatten_tokens(x)
         h = self.joint_queries.unsqueeze(0).expand(tokens.shape[0], -1, -1)
         for layer in self.cross_attention_layers:
@@ -89,4 +93,7 @@ class WiFlowJointDecoder(nn.Module):
 
         attention_output, _ = self.joint_attention(h, h, h, need_weights=False)
         h = self.attention_norm(h + attention_output)
-        return self.coordinate_head(h)
+        coordinates = self.coordinate_head(h)
+        if return_features:
+            return coordinates, h
+        return coordinates

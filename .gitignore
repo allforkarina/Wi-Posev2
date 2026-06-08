@@ -28,6 +28,9 @@ outputs/
 *.pth
 *.ckpt
 
+# Generated reports and local writing artifacts
+*.docx
+
 .idea/
 .vscode/
 .DS_Store

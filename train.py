@@ -61,6 +61,7 @@ class TrainConfig:
     weight_decay: float = 5e-4
     grad_clip_norm: float = 1.0
     bone_loss_weight: float = 0.5
+    latent_structure_loss_weight: float = 0.0
     num_workers: int = 4
     device: str = "cuda"
     seed: int = 42
@@ -101,25 +102,81 @@ def bone_length_loss(
     return F.l1_loss(pred_lengths, target_lengths)
 
 
-def extract_prediction_keypoints(prediction: torch.Tensor) -> torch.Tensor:
+def unpack_model_output(
+    prediction: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if isinstance(prediction, tuple):
+        if len(prediction) != 2:
+            raise ValueError(f"Unexpected model prediction tuple length: {len(prediction)}")
+        keypoints, decoder_features = prediction
+        if not isinstance(keypoints, torch.Tensor) or not isinstance(decoder_features, torch.Tensor):
+            raise TypeError(f"Unexpected model prediction tuple types: {type(prediction)!r}")
+        return keypoints, decoder_features
     if not isinstance(prediction, torch.Tensor):
         raise TypeError(f"Unexpected model prediction type: {type(prediction)!r}")
+    return prediction, None
+
+
+def extract_prediction_keypoints(
+    prediction: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+) -> torch.Tensor:
+    prediction, _ = unpack_model_output(prediction)
     return prediction
+
+
+def joint_latent_structure_loss(
+    decoder_features: torch.Tensor,
+    target: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    if decoder_features.ndim != 3:
+        raise ValueError("decoder_features must be shaped [B, J, D]")
+    if target.ndim != 3 or target.shape[-1] != 2:
+        raise ValueError("target must be shaped [B, J, 2]")
+    if decoder_features.shape[:2] != target.shape[:2]:
+        raise ValueError(
+            "decoder_features and target must share batch and joint dimensions, "
+            f"got {tuple(decoder_features.shape)} and {tuple(target.shape)}"
+        )
+
+    normalized_features = F.normalize(decoder_features, dim=-1, eps=eps)
+    latent_dist = 1.0 - torch.matmul(
+        normalized_features,
+        normalized_features.transpose(1, 2),
+    )
+    pose_dist = torch.cdist(target, target, p=2)
+
+    num_joints = target.shape[1]
+    off_diagonal = ~torch.eye(num_joints, dtype=torch.bool, device=target.device)
+    latent_values = latent_dist[:, off_diagonal]
+    pose_values = pose_dist[:, off_diagonal]
+    latent_values = latent_values / latent_values.mean(dim=1, keepdim=True).clamp_min(eps)
+    pose_values = pose_values / pose_values.mean(dim=1, keepdim=True).clamp_min(eps)
+    return F.smooth_l1_loss(latent_values, pose_values)
 
 
 def compute_losses(
     prediction: torch.Tensor,
     target: torch.Tensor,
     bone_loss_weight: float = 0.5,
+    decoder_features: torch.Tensor | None = None,
+    latent_structure_loss_weight: float = 0.0,
 ) -> Dict[str, torch.Tensor]:
     coord = F.l1_loss(prediction, target)
     bone = bone_length_loss(prediction, target)
     total = coord + bone_loss_weight * bone
-    return {
+    losses = {
         "loss": total,
         "coord_loss": coord,
         "bone_loss": bone,
     }
+    if latent_structure_loss_weight > 0.0:
+        if decoder_features is None:
+            raise ValueError("decoder_features are required when latent_structure_loss_weight > 0")
+        latent_structure = joint_latent_structure_loss(decoder_features, target)
+        losses["latent_structure_loss"] = latent_structure
+        losses["loss"] = losses["loss"] + latent_structure_loss_weight * latent_structure
+    return losses
 
 
 def compute_torso_scale(target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -172,11 +229,17 @@ def run_epoch(
         model_input, target = prepare_model_input(batch, device)
 
         with torch.set_grad_enabled(is_training):
-            prediction = model(model_input)
+            output = model(
+                model_input,
+                return_decoder_features=criterion_config.latent_structure_loss_weight > 0.0,
+            )
+            prediction, decoder_features = unpack_model_output(output)
             losses = compute_losses(
                 prediction,
                 target,
                 bone_loss_weight=criterion_config.bone_loss_weight,
+                decoder_features=decoder_features,
+                latent_structure_loss_weight=criterion_config.latent_structure_loss_weight,
             )
             keypoint_prediction = extract_prediction_keypoints(prediction)
             metrics = compute_metrics(keypoint_prediction.detach(), target)
@@ -215,11 +278,17 @@ def run_finetune_epoch(
     for batch in loader:
         model_input, target = prepare_model_input(batch, device)
         optimizer.zero_grad(set_to_none=True)
-        prediction = model(model_input)
+        output = model(
+            model_input,
+            return_decoder_features=criterion_config.latent_structure_loss_weight > 0.0,
+        )
+        prediction, decoder_features = unpack_model_output(output)
         losses = compute_losses(
             prediction,
             target,
             bone_loss_weight=criterion_config.bone_loss_weight,
+            decoder_features=decoder_features,
+            latent_structure_loss_weight=criterion_config.latent_structure_loss_weight,
         )
         losses["loss"].backward()
         torch.nn.utils.clip_grad_norm_(
@@ -480,6 +549,7 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
             "epoch": epoch,
             "axial_mode": config.axial_mode,
             "decoder_type": config.decoder_type,
+            "latent_structure_loss_weight": config.latent_structure_loss_weight,
             "train_loss": train_metrics["loss"],
             "train_coord_loss": train_metrics["coord_loss"],
             "train_bone_loss": train_metrics["bone_loss"],
@@ -494,6 +564,10 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
             "current_lr": current_lr,
             "epoch_time": epoch_time,
         }
+        if "latent_structure_loss" in train_metrics:
+            row["train_latent_structure_loss"] = train_metrics["latent_structure_loss"]
+        if "latent_structure_loss" in val_metrics:
+            row["val_latent_structure_loss"] = val_metrics["latent_structure_loss"]
         append_csv_row(log_path, row)
 
         save_checkpoint(
@@ -612,12 +686,15 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
 
         row: Dict[str, float | int | str] = {
             "epoch": epoch,
+            "latent_structure_loss_weight": config.latent_structure_loss_weight,
             "train_loss": train_metrics["loss"],
             "train_coord_loss": train_metrics["coord_loss"],
             "train_bone_loss": train_metrics["bone_loss"],
             "current_lr": current_lr,
             "epoch_time": epoch_time,
         }
+        if "latent_structure_loss" in train_metrics:
+            row["train_latent_structure_loss"] = train_metrics["latent_structure_loss"]
         append_csv_row(log_path, row)
 
         save_checkpoint(
@@ -666,6 +743,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument(
+        "--latent-structure-loss-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for decoder joint-latent pairwise structure loss. "
+            "Default 0 preserves the baseline coordinate and bone losses."
+        ),
+    )
     parser.add_argument("--source-envs", nargs="*", default=None, help="Source environment names")
     parser.add_argument("--target-envs", nargs="*", default=None, help="Target environment names")
     parser.add_argument("--finetune-from", default=None, help="Path to source checkpoint for finetune")

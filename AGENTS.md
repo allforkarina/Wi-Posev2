@@ -6,7 +6,7 @@
 - `data/heatmap_gt.py`: OpenPose18 coordinate conversion utilities (coco17_to_openpose18, valid_point).
 - `pose_targets.py`: Reserved for future pose target utilities.
 - `models/`: PyTorch model code, including the full WiFlow model, CSI spatial encoder with symmetric spatio-temporal downsampling, axial attention encoder, multi-layer joint cross-attention decoder, hierarchical joint decoder ablation, and shared OpenPose18 skeleton topology. The active single-frame model path is CSI amplitude input -> spatial encoder with antenna mixing, feature stem, and symmetric time-frequency residual blocks -> axial encoder -> the configured decoder.
-- `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and CSV logging. Supports `--mode source_only` (single-domain training) and `--mode finetune` (cross-domain few-shot finetuning with explicit `--trainable-groups` ablations such as encoder-only, decoder-only, and full finetuning).
+- `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and CSV logging. Supports `--mode source_only` (single-domain training), `--mode finetune` (cross-domain few-shot finetuning with explicit `--trainable-groups` ablations such as encoder-only, decoder-only, and full finetuning), and optional decoder joint-latent structure supervision via `--latent-structure-loss-weight`.
 - `eval.py`: Root-level evaluation entrypoint for loading checkpoints, computing test metrics, and optionally generating research-grade feature visualizations via `--feature-viz`. Supports `--eval-envs` (environment filtering) and `--exclude-indices` (exclude few-shot training frames).
 - `evaluation/`: Evaluation pipeline package.
   - `evaluation/hooks.py`: Forward hook context manager (`WiFlowHookContext`, `wiflow_hooks`) for non-invasive intermediate feature extraction from WiFlow submodules.
@@ -28,6 +28,7 @@ Generated datasets can be large and should not be committed. Keep raw dataset ro
 - The central modeling gap is that CSI is a low-resolution, high-noise, implicit sensing signal, while pose regression needs precise coordinates. Strong skeleton priors are important for bridging that gap.
 - Preserve CSI physical dimension semantics where practical. Avoid arbitrary flattening or pooling that mixes antenna, subcarrier, and temporal meanings before the model has selected useful information.
 - Prefer attention-based information selection over destructive pooling for low-SNR CSI features, and use structured supervision such as bone or topology-aware losses in addition to coordinate losses.
+- When testing decoder-domain cross-environment adaptation, `--latent-structure-loss-weight` adds a supervised loss on the decoder's final `[B, 18, D]` joint latent states. The loss matches normalized pairwise joint-latent distances to normalized GT pose pairwise distances, encouraging the decoder to preserve per-sample skeleton structure before the coordinate head rather than relying only on final coordinate errors.
 
 ## Build, Test, and Development Commands
 Use the existing Conda environment for development commands:
@@ -107,6 +108,9 @@ python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2
 
 # Decoder-only: adapt pose decoding while freezing CSI feature extraction
 python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\ft_decoder --finetune-from outputs\source_baseline\best_val_mpjpe.pth --trainable-groups decoder --epochs 30
+
+# Decoder-only with joint-latent structure supervision: test whether decoder hidden states preserve target-domain skeleton geometry before the coordinate head
+python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\ft_decoder_latent_w01 --finetune-from outputs\source_baseline\best_val_mpjpe.pth --trainable-groups decoder --latent-structure-loss-weight 0.1 --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
 
 # Full finetune: update all parameters as an upper-bound / overfitting-risk comparison
 python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\ft_full --finetune-from outputs\source_baseline\best_val_mpjpe.pth --trainable-groups full --epochs 30

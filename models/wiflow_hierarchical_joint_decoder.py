@@ -110,7 +110,11 @@ class WiFlowHierarchicalJointDecoder(nn.Module):
             raise ValueError("WiFlowHierarchicalJointDecoder expects input shaped [B, 256, 29, 16]")
         return x.flatten(2).transpose(1, 2)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_features: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         tokens = self.flatten_tokens(x)
         batch_size = tokens.shape[0]
         context_parts: list[torch.Tensor] = []
@@ -132,4 +136,7 @@ class WiFlowHierarchicalJointDecoder(nn.Module):
 
         attention_output, _ = self.joint_attention(h, h, h, need_weights=False)
         h = self.attention_norm(h + attention_output)
-        return self.coordinate_head(h)
+        coordinates = self.coordinate_head(h)
+        if return_features:
+            return coordinates, h
+        return coordinates
