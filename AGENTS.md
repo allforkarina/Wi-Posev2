@@ -5,8 +5,8 @@
 - `data/memmap_dataset.py`: NPY memmap dataset reader that loads CSI amplitude, OpenPose18 keypoints, and metadata from `.npy`/`.npz` files with zero-copy OS-cached I/O.
 - `data/heatmap_gt.py`: OpenPose18 coordinate conversion utilities (coco17_to_openpose18, valid_point).
 - `pose_targets.py`: Reserved for future pose target utilities.
-- `models/`: PyTorch model code, including the full WiFlow model, CSI spatial encoder with symmetric spatio-temporal downsampling, axial attention encoder, multi-layer joint cross-attention decoder, hierarchical joint decoder ablation, and shared OpenPose18 skeleton topology. The active single-frame model path is CSI amplitude input -> spatial encoder with antenna mixing, feature stem, and symmetric time-frequency residual blocks -> axial encoder -> the configured decoder.
-- `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and CSV logging. Supports `--mode source_only` (single-domain training), `--mode finetune` (cross-domain few-shot finetuning with explicit `--trainable-groups` ablations such as encoder-only, decoder-only, and full finetuning), optional decoder joint-latent structure supervision via `--latent-structure-loss-weight`, and optional target-domain encoder pose-relation supervision via `--encoder-relation-loss-weight`.
+- `models/`: PyTorch model code, including the full WiFlow model, CSI physics feature-bank input transform, CSI spatial encoder with symmetric spatio-temporal downsampling, axial attention encoder, multi-layer joint cross-attention decoder, hierarchical joint decoder ablation, and shared OpenPose18 skeleton topology. The active single-frame model path is raw CSI amplitude -> optional CSI feature bank -> spatial encoder with antenna mixing, feature stem, and symmetric time-frequency residual blocks -> axial encoder -> the configured decoder.
+- `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and CSV logging. Supports `--mode source_only` (single-domain training), `--mode finetune` (cross-domain few-shot finetuning with explicit `--trainable-groups` ablations such as encoder-only, decoder-only, and full finetuning), `--csi-feature-mode raw|physics_bank`, optional decoder joint-latent structure supervision via `--latent-structure-loss-weight`, and optional target-domain encoder pose-relation supervision via `--encoder-relation-loss-weight`.
 - `eval.py`: Root-level evaluation entrypoint for loading checkpoints, computing test metrics, and optionally generating research-grade feature visualizations via `--feature-viz`. Supports `--eval-envs` (environment filtering) and `--exclude-indices` (exclude few-shot training frames).
 - `evaluation/`: Evaluation pipeline package.
   - `evaluation/hooks.py`: Forward hook context manager (`WiFlowHookContext`, `wiflow_hooks`) for non-invasive intermediate feature extraction from WiFlow submodules.
@@ -28,6 +28,7 @@ Generated datasets can be large and should not be committed. Keep raw dataset ro
 - The central modeling gap is that CSI is a low-resolution, high-noise, implicit sensing signal, while pose regression needs precise coordinates. Strong skeleton priors are important for bridging that gap.
 - Preserve CSI physical dimension semantics where practical. Avoid arbitrary flattening or pooling that mixes antenna, subcarrier, and temporal meanings before the model has selected useful information.
 - Prefer attention-based information selection over destructive pooling for low-SNR CSI features, and use structured supervision such as bone or topology-aware losses in addition to coordinate losses.
+- `--csi-feature-mode physics_bank` expands the raw 3-channel amplitude tensor to 12 channels by concatenating raw amplitude, temporal residuals, antenna differential responses, and subcarrier gradients. This tests whether cross-domain failure is caused by weak human-induced CSI perturbations being buried under environment-specific static multipath. The raw view remains present, so the ablation adds physically motivated evidence rather than deleting amplitude-scale information.
 - When testing decoder-domain cross-environment adaptation, `--latent-structure-loss-weight` adds a supervised loss on the decoder's final `[B, 18, D]` joint latent states. The loss matches normalized pairwise joint-latent distances to normalized GT pose pairwise distances, encouraging the decoder to preserve per-sample skeleton structure before the coordinate head rather than relying only on final coordinate errors.
 - When testing encoder-domain target adaptation, `--encoder-relation-loss-weight` adds a target-batch relational loss between pooled axial encoder features and GT pose distances. This does not force source and target CSI features to be equal; it only asks target-domain encoder features to preserve pose-neighborhood structure within the target room.
 
@@ -65,6 +66,12 @@ python train.py --mode source_only --dataset-root data\mmfi_pose --epochs 50 --b
 
 The default training configuration uses CSI amplitude input (3 channels), `OneCycleLR`, gradient clipping, `coord_l1 + 0.5 * bone_l1`, the baseline axial mode `spatial_then_temporal`, and AdamW weight decay.
 
+Run the physics-bank input representation ablation when testing whether target-domain degradation is caused by static multipath dominating weak human-induced CSI perturbations:
+
+```powershell
+python train.py --mode source_only --dataset-root data\mmfi_pose --source-envs env1 --output-dir outputs\source_env1_physics_bank --csi-feature-mode physics_bank --epochs 50 --batch-size 64
+```
+
 Run an axial-attention encoder ablation:
 
 ```powershell
@@ -91,11 +98,17 @@ python eval.py --dataset-root data\mmfi_pose --checkpoint outputs\train\best_val
 # Phase 1: Source-only Training
 python train.py --mode source_only --dataset-root data\mmfi_pose --source-envs env1 --output-dir outputs\source_baseline --epochs 50
 
+# Optional Phase 1 variant: Source-only Training with physics-bank input
+python train.py --mode source_only --dataset-root data\mmfi_pose --source-envs env1 --output-dir outputs\source_physics_bank --csi-feature-mode physics_bank --epochs 50
+
 # Phase 2: Baseline Evaluation
 python eval.py --dataset-root data\mmfi_pose --checkpoint outputs\source_baseline\best_val_mpjpe.pth --eval-envs env2 --output-dir outputs\baseline_eval
 
 # Phase 3: Few-shot Finetune
 python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\finetune --finetune-from outputs\source_baseline\best_val_mpjpe.pth --trainable-groups encoder --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
+
+# Optional Phase 3 variant: Few-shot Finetune from a physics-bank source checkpoint
+python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\finetune_physics_bank --finetune-from outputs\source_physics_bank\best_val_mpjpe.pth --csi-feature-mode physics_bank --trainable-groups encoder --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
 
 # Phase 4: Post-FT Evaluation
 python eval.py --dataset-root data\mmfi_pose --checkpoint outputs\finetune\best_train_loss.pth --eval-envs env2 --output-dir outputs\finetune_eval --exclude-indices outputs\finetune\few_shot_train_indices.npy

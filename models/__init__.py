@@ -1,3 +1,4 @@
+from .csi_feature_bank import CSI_FEATURE_MODES, build_csi_feature_bank, csi_feature_input_channels
 from .skeleton import NUM_OPENPOSE_KEYPOINTS, OPENPOSE_BONE_EDGES, build_normalized_adjacency
 from .wiflow_axial_encoder import AXIAL_ENCODER_MODES, WiFlowAxialEncoder
 from .wiflow_hierarchical_joint_decoder import WiFlowHierarchicalJointDecoder
@@ -13,6 +14,9 @@ __all__ = [
     "DECODER_TYPES",
     "WiFlowJointDecoder",
     "WiFlowHierarchicalJointDecoder",
+    "CSI_FEATURE_MODES",
+    "build_csi_feature_bank",
+    "csi_feature_input_channels",
     "OPENPOSE_BONE_EDGES",
     "NUM_OPENPOSE_KEYPOINTS",
     "build_normalized_adjacency",

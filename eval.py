@@ -50,6 +50,7 @@ def load_checkpoint_model(
         input_channels=3,
         axial_mode=str(train_config.get("axial_mode", "spatial_then_temporal")),
         decoder_type=str(train_config.get("decoder_type", "joint")),
+        csi_feature_mode=str(train_config.get("csi_feature_mode", "raw")),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()

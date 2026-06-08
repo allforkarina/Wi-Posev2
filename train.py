@@ -16,7 +16,7 @@ from torch.optim.lr_scheduler import LRScheduler, OneCycleLR
 from torch.utils.data import DataLoader, Subset
 
 from dataloader import create_few_shot_data_loader, create_memmap_data_loader, create_memmap_data_loaders
-from models import AXIAL_ENCODER_MODES, DECODER_TYPES, OPENPOSE_BONE_EDGES, WiFlowModel
+from models import AXIAL_ENCODER_MODES, CSI_FEATURE_MODES, DECODER_TYPES, OPENPOSE_BONE_EDGES, WiFlowModel
 
 
 PCK_THRESHOLDS: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5)
@@ -54,6 +54,7 @@ class TrainConfig:
     output_dir: str = "outputs/train"
     axial_mode: str = "spatial_then_temporal"
     decoder_type: str = "joint"
+    csi_feature_mode: str = "raw"
     epochs: int = 50
     batch_size: int = 64
     lr: float = 2e-5
@@ -566,6 +567,7 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
         input_channels=3,
         axial_mode=config.axial_mode,
         decoder_type=config.decoder_type,
+        csi_feature_mode=config.csi_feature_mode,
     ).to(device)
     optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     scheduler = OneCycleLR(
@@ -614,6 +616,7 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
             "epoch": epoch,
             "axial_mode": config.axial_mode,
             "decoder_type": config.decoder_type,
+            "csi_feature_mode": config.csi_feature_mode,
             "latent_structure_loss_weight": config.latent_structure_loss_weight,
             "encoder_relation_loss_weight": config.encoder_relation_loss_weight,
             "train_loss": train_metrics["loss"],
@@ -709,6 +712,7 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         input_channels=3,
         axial_mode=config.axial_mode,
         decoder_type=config.decoder_type,
+        csi_feature_mode=config.csi_feature_mode,
     ).to(device)
     if "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -756,6 +760,7 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
 
         row: Dict[str, float | int | str] = {
             "epoch": epoch,
+            "csi_feature_mode": config.csi_feature_mode,
             "latent_structure_loss_weight": config.latent_structure_loss_weight,
             "encoder_relation_loss_weight": config.encoder_relation_loss_weight,
             "train_loss": train_metrics["loss"],
@@ -813,6 +818,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="outputs/train", help="Directory for logs and checkpoints.")
     parser.add_argument("--axial-mode", default="spatial_then_temporal", choices=AXIAL_ENCODER_MODES)
     parser.add_argument("--decoder-type", default="joint", choices=DECODER_TYPES)
+    parser.add_argument(
+        "--csi-feature-mode",
+        default="raw",
+        choices=CSI_FEATURE_MODES,
+        help=(
+            "CSI input representation before the spatial encoder. "
+            "raw preserves the 3-channel baseline; physics_bank expands to 12 channels."
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)

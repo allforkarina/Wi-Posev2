@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from .csi_feature_bank import CSI_FEATURE_MODES, build_csi_feature_bank, csi_feature_input_channels
 from .wiflow_axial_encoder import WiFlowAxialEncoder
 from .wiflow_hierarchical_joint_decoder import WiFlowHierarchicalJointDecoder
 from .wiflow_joint_decoder import WiFlowJointDecoder
@@ -19,14 +20,21 @@ class WiFlowModel(nn.Module):
         input_channels: int = 3,
         axial_mode: str = "spatial_then_temporal",
         decoder_type: str = "joint",
+        csi_feature_mode: str = "raw",
     ) -> None:
         super().__init__()
         if decoder_type not in DECODER_TYPES:
             raise ValueError(f"decoder_type must be one of {DECODER_TYPES}")
+        if input_channels != 3:
+            raise ValueError("WiFlowModel expects three raw CSI amplitude channels before feature-bank expansion")
+        if csi_feature_mode not in CSI_FEATURE_MODES:
+            raise ValueError(f"csi_feature_mode must be one of {CSI_FEATURE_MODES}")
         self.input_channels = input_channels
         self.axial_mode = axial_mode
         self.decoder_type = decoder_type
-        self.spatial_encoder = WiFlowSpatialEncoder(input_channels=input_channels)
+        self.csi_feature_mode = csi_feature_mode
+        self.encoder_input_channels = csi_feature_input_channels(csi_feature_mode)
+        self.spatial_encoder = WiFlowSpatialEncoder(input_channels=self.encoder_input_channels)
         self.axial_encoder = WiFlowAxialEncoder(mode=axial_mode)
         if decoder_type == "joint":
             self.decoder = WiFlowJointDecoder()
@@ -36,6 +44,7 @@ class WiFlowModel(nn.Module):
     def encode_features(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 4:
             raise ValueError("WiFlowModel expects input shaped [B, 3, 114, 64]")
+        x = build_csi_feature_bank(x, mode=self.csi_feature_mode)
         x = self.spatial_encoder(x)
         return self.axial_encoder(x)
 

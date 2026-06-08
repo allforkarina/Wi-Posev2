@@ -47,23 +47,23 @@ class SymmetricResidualDownsampleBlock(nn.Module):
 
 
 class WiFlowSpatialEncoder(nn.Module):
-    """Spatial CSI encoder from [B, 3, 114, 64] to [B, 128, 29, 16]."""
+    """Spatial CSI encoder from [B, C, 114, 64] to [B, 128, 29, 16]."""
 
     def __init__(self, input_channels: int = 3) -> None:
         super().__init__()
-        if input_channels != 3:
-            raise ValueError("input_channels must be 3 for three-antenna CSI amplitude features")
+        if input_channels not in (3, 12):
+            raise ValueError("input_channels must be 3 for raw CSI or 12 for the physics feature bank")
         self.input_channels = input_channels
         self.stem_channels = 32
 
         self.antenna_mixer = nn.Sequential(
-            nn.Conv2d(3, 3, kernel_size=1, bias=False),
-            nn.BatchNorm2d(3),
+            nn.Conv2d(input_channels, input_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(input_channels),
             nn.ReLU(inplace=True),
         )
         self.feature_stem = nn.Sequential(
             nn.Conv2d(
-                in_channels=3,
+                in_channels=input_channels,
                 out_channels=self.stem_channels,
                 kernel_size=(3, 5),
                 stride=(1, 1),
