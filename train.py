@@ -43,6 +43,7 @@ TRAINABLE_GROUPS: tuple[str, ...] = (
     "decoder",
     "full",
     "input_calibration",
+    "wrist_refiner",
     "spatial_encoder",
     "axial_encoder",
     "axial_attention",
@@ -89,6 +90,7 @@ class TrainConfig:
     distal_replay_fraction: float = 0.5
     source_replay_weight: float = 0.0
     wrist_direction_loss_weight: float = 0.0
+    wrist_refinement: bool = False
     num_workers: int = 4
     device: str = "cuda"
     seed: int = 42
@@ -573,6 +575,8 @@ def _matches_trainable_group(
         return True
     if group == "input_calibration":
         return name.startswith("input_calibration.")
+    if group == "wrist_refiner":
+        return name.startswith("wrist_refiner.")
     if group == "spatial_encoder":
         return name.startswith("spatial_encoder.")
     if group == "axial_encoder":
@@ -646,7 +650,7 @@ def load_finetune_state_dict(
     allowed_missing = {
         name
         for name, _ in model.named_parameters()
-        if name.startswith("input_calibration.")
+        if name.startswith(("input_calibration.", "wrist_refiner."))
     }
     unexpected = list(incompatible.unexpected_keys)
     missing = [name for name in incompatible.missing_keys if name not in allowed_missing]
@@ -657,7 +661,7 @@ def load_finetune_state_dict(
         )
     if incompatible.missing_keys:
         print(
-            "Initialized new input calibration parameters: "
+            "Initialized new finetune parameters: "
             f"{tuple(incompatible.missing_keys)}"
         )
     return incompatible
@@ -724,6 +728,7 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
         spatial_stem_type=config.spatial_stem_type,
         background_kernel_size=config.background_kernel_size,
         input_calibration=config.input_calibration,
+        wrist_refinement=config.wrist_refinement,
     ).to(device)
     optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     scheduler = OneCycleLR(
@@ -776,6 +781,7 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
             "spatial_stem_type": config.spatial_stem_type,
             "background_kernel_size": config.background_kernel_size,
             "input_calibration": config.input_calibration,
+            "wrist_refinement": config.wrist_refinement,
             "latent_structure_loss_weight": config.latent_structure_loss_weight,
             "encoder_relation_loss_weight": config.encoder_relation_loss_weight,
             "train_loss": train_metrics["loss"],
@@ -854,6 +860,8 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         raise ValueError("--distal-replay-fraction must be in (0, 1]")
     if config.source_replay_weight > 0.0 and not config.source_envs:
         raise ValueError("--source-envs required when --source-replay-weight > 0")
+    if "wrist_refiner" in config.trainable_groups and not config.wrist_refinement:
+        raise ValueError("--wrist-refinement is required when training wrist_refiner parameters")
 
     train_loader, val_loader, train_indices = create_few_shot_data_loader(
         data_dir=config.dataset_root,
@@ -917,6 +925,7 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         spatial_stem_type=config.spatial_stem_type,
         background_kernel_size=config.background_kernel_size,
         input_calibration=config.input_calibration,
+        wrist_refinement=config.wrist_refinement,
     ).to(device)
     if "model_state_dict" in checkpoint:
         load_finetune_state_dict(model, checkpoint["model_state_dict"])
@@ -968,6 +977,7 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
             "spatial_stem_type": config.spatial_stem_type,
             "background_kernel_size": config.background_kernel_size,
             "input_calibration": config.input_calibration,
+            "wrist_refinement": config.wrist_refinement,
             "latent_structure_loss_weight": config.latent_structure_loss_weight,
             "encoder_relation_loss_weight": config.encoder_relation_loss_weight,
             "distal_loss_weight": config.distal_loss_weight,
@@ -1136,6 +1146,13 @@ def parse_args() -> argparse.Namespace:
             "Default 0 disables this loss."
         ),
     )
+    parser.add_argument(
+        "--wrist-refinement",
+        action="store_true",
+        help=(
+            "Enable an identity-initialized local refinement head for custom wrist joints 10 and 12."
+        ),
+    )
     parser.add_argument("--source-envs", nargs="*", default=None, help="Source environment names")
     parser.add_argument("--target-envs", nargs="*", default=None, help="Target environment names")
     parser.add_argument("--finetune-from", default=None, help="Path to source checkpoint for finetune")
@@ -1150,7 +1167,8 @@ def parse_args() -> argparse.Namespace:
             "Parameter groups to train during finetune. Main ablations: encoder, "
             "decoder, full. Fine-grained groups include spatial_encoder, "
             "axial_encoder, axial_attention, axial_projection, decoder_queries, "
-            "decoder_attention, decoder_head, decoder_norms, input_calibration, norms."
+            "decoder_attention, decoder_head, decoder_norms, input_calibration, "
+            "wrist_refiner, norms."
         ),
     )
     parser.add_argument(

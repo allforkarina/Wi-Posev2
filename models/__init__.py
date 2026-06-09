@@ -11,6 +11,7 @@ from .wiflow_hierarchical_joint_decoder import WiFlowHierarchicalJointDecoder
 from .wiflow_joint_decoder import WiFlowJointDecoder
 from .wiflow_model import DECODER_TYPES, WiFlowModel
 from .wiflow_spatial_encoder import BackgroundGatedSpatialStem, SPATIAL_STEM_TYPES, WiFlowSpatialEncoder
+from .wrist_refiner import CUSTOM_WRIST_JOINTS, WRIST_CONTEXT_JOINTS, WristRefinementHead
 
 __all__ = [
     "WiFlowModel",
@@ -22,6 +23,9 @@ __all__ = [
     "WiFlowJointDecoder",
     "WiFlowHierarchicalJointDecoder",
     "BackgroundGatedSpatialStem",
+    "WristRefinementHead",
+    "CUSTOM_WRIST_JOINTS",
+    "WRIST_CONTEXT_JOINTS",
     "CSI_FEATURE_MODES",
     "CSI_INPUT_CALIBRATION_TYPES",
     "AntennaSubcarrierAffineCalibration",

@@ -9,6 +9,7 @@ from .wiflow_axial_encoder import WiFlowAxialEncoder
 from .wiflow_hierarchical_joint_decoder import WiFlowHierarchicalJointDecoder
 from .wiflow_joint_decoder import WiFlowJointDecoder
 from .wiflow_spatial_encoder import WiFlowSpatialEncoder
+from .wrist_refiner import WristRefinementHead
 
 DECODER_TYPES = ("joint", "hierarchical")
 
@@ -25,6 +26,7 @@ class WiFlowModel(nn.Module):
         spatial_stem_type: str = "baseline",
         background_kernel_size: int = 9,
         input_calibration: str = "none",
+        wrist_refinement: bool = False,
     ) -> None:
         super().__init__()
         if decoder_type not in DECODER_TYPES:
@@ -42,6 +44,7 @@ class WiFlowModel(nn.Module):
         self.spatial_stem_type = spatial_stem_type
         self.background_kernel_size = background_kernel_size
         self.input_calibration_type = input_calibration
+        self.wrist_refinement = wrist_refinement
         self.input_calibration = build_csi_input_calibration(input_calibration)
         self.encoder_input_channels = csi_feature_input_channels(csi_feature_mode)
         self.spatial_encoder = WiFlowSpatialEncoder(
@@ -54,6 +57,8 @@ class WiFlowModel(nn.Module):
             self.decoder = WiFlowJointDecoder()
         elif decoder_type == "hierarchical":
             self.decoder = WiFlowHierarchicalJointDecoder()
+        if wrist_refinement:
+            self.wrist_refiner = WristRefinementHead(embedding_dim=self.decoder.embedding_dim)
 
     def encode_features(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 4:
@@ -68,7 +73,14 @@ class WiFlowModel(nn.Module):
         x: torch.Tensor,
         return_decoder_features: bool = False,
     ):
-        return self.decoder(x, return_features=return_decoder_features)
+        if not self.wrist_refinement:
+            return self.decoder(x, return_features=return_decoder_features)
+
+        coordinates, decoder_features = self.decoder(x, return_features=True)
+        coordinates = self.wrist_refiner(coordinates, decoder_features)
+        if return_decoder_features:
+            return coordinates, decoder_features
+        return coordinates
 
     def forward(
         self,

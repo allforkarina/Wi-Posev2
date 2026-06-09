@@ -54,6 +54,7 @@ def load_checkpoint_model(
         spatial_stem_type=str(train_config.get("spatial_stem_type", "baseline")),
         background_kernel_size=int(train_config.get("background_kernel_size", 9)),
         input_calibration=str(train_config.get("input_calibration", "none")),
+        wrist_refinement=bool(train_config.get("wrist_refinement", False)),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
