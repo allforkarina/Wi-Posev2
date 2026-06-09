@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -15,7 +16,12 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LRScheduler, OneCycleLR
 from torch.utils.data import DataLoader, Subset
 
-from dataloader import create_few_shot_data_loader, create_memmap_data_loader, create_memmap_data_loaders
+from dataloader import (
+    create_few_shot_data_loader,
+    create_memmap_data_loader,
+    create_memmap_data_loaders,
+    memmap_collate_fn,
+)
 from models import (
     AXIAL_ENCODER_MODES,
     CSI_FEATURE_MODES,
@@ -30,6 +36,7 @@ from models import (
 PCK_THRESHOLDS: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5)
 RIGHT_SHOULDER_INDEX = 2
 LEFT_HIP_INDEX = 11
+DISTAL_SUPERVISION_JOINTS: tuple[int, ...] = (4, 7, 9, 10, 12, 13)
 TRAINABLE_GROUPS: tuple[str, ...] = (
     "encoder",
     "decoder",
@@ -76,6 +83,10 @@ class TrainConfig:
     bone_loss_weight: float = 0.5
     latent_structure_loss_weight: float = 0.0
     encoder_relation_loss_weight: float = 0.0
+    distal_loss_weight: float = 0.0
+    distal_replay_factor: int = 1
+    distal_replay_fraction: float = 0.5
+    source_replay_weight: float = 0.0
     num_workers: int = 4
     device: str = "cuda"
     seed: int = 42
@@ -114,6 +125,53 @@ def bone_length_loss(
         dim=-1,
     )
     return F.l1_loss(pred_lengths, target_lengths)
+
+
+def distal_joint_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    joints: tuple[int, ...] = DISTAL_SUPERVISION_JOINTS,
+) -> torch.Tensor:
+    joint_index = torch.as_tensor(joints, dtype=torch.long, device=prediction.device)
+    return torch.linalg.vector_norm(
+        prediction[:, joint_index] - target[:, joint_index],
+        dim=-1,
+    ).mean()
+
+
+def _dataset_keypoints(dataset: torch.utils.data.Dataset, index: int) -> torch.Tensor:
+    item = dataset[index]
+    if "kpts18" in item:
+        return torch.as_tensor(item["kpts18"], dtype=torch.float32)
+    if "keypoints" in item:
+        return torch.as_tensor(item["keypoints"], dtype=torch.float32)
+    raise KeyError("Dataset item must contain kpts18 or keypoints for distal replay scoring")
+
+
+def build_distal_hard_replay_subset(
+    dataset: torch.utils.data.Dataset,
+    replay_factor: int,
+    replay_fraction: float,
+    joints: tuple[int, ...] = DISTAL_SUPERVISION_JOINTS,
+) -> Subset:
+    if replay_factor < 1:
+        raise ValueError("replay_factor must be >= 1")
+    if not (0.0 < replay_fraction <= 1.0):
+        raise ValueError("replay_fraction must be in (0, 1]")
+    if replay_factor == 1 or len(dataset) == 0:
+        return Subset(dataset, list(range(len(dataset))))
+
+    keypoints = torch.stack([
+        _dataset_keypoints(dataset, i)
+        for i in range(len(dataset))
+    ])
+    distal = keypoints[:, list(joints)]
+    distal_center = distal.mean(dim=0, keepdim=True)
+    distal_scores = torch.linalg.vector_norm(distal - distal_center, dim=-1).mean(dim=-1)
+    hard_count = max(1, int(math.ceil(len(dataset) * replay_fraction)))
+    hard_indices = torch.topk(distal_scores, k=hard_count).indices.tolist()
+    replay_indices = list(range(len(dataset))) + hard_indices * (replay_factor - 1)
+    return Subset(dataset, replay_indices)
 
 
 def unpack_model_output(
@@ -338,10 +396,12 @@ def run_finetune_epoch(
     device: torch.device,
     optimizer: AdamW,
     scheduler: LRScheduler | None = None,
+    source_loader: Iterable[Mapping[str, torch.Tensor]] | None = None,
 ) -> Dict[str, float]:
     model.train()
     totals: Dict[str, float] = {}
     sample_count = 0
+    source_iter = iter(source_loader) if source_loader is not None else None
 
     for batch in loader:
         model_input, target = prepare_model_input(batch, device)
@@ -368,6 +428,37 @@ def run_finetune_epoch(
             encoder_features=encoder_features,
             encoder_relation_loss_weight=criterion_config.encoder_relation_loss_weight,
         )
+        if criterion_config.distal_loss_weight > 0.0:
+            distal = distal_joint_loss(prediction, target)
+            losses["distal_loss"] = distal
+            losses["loss"] = losses["loss"] + criterion_config.distal_loss_weight * distal
+
+        target_loss = losses["loss"]
+        total_loss = target_loss
+        source_loss = None
+        if criterion_config.source_replay_weight > 0.0:
+            if source_iter is None or source_loader is None:
+                raise ValueError("source_loader is required when source_replay_weight > 0")
+            try:
+                source_batch = next(source_iter)
+            except StopIteration:
+                source_iter = iter(source_loader)
+                source_batch = next(source_iter)
+            source_input, source_target = prepare_model_input(source_batch, device)
+            source_output = model(source_input)
+            source_prediction = extract_prediction_keypoints(source_output)
+            source_losses = compute_losses(
+                source_prediction,
+                source_target,
+                bone_loss_weight=criterion_config.bone_loss_weight,
+            )
+            source_loss = source_losses["loss"]
+            total_loss = total_loss + criterion_config.source_replay_weight * source_loss
+
+        losses["target_loss"] = target_loss
+        if source_loss is not None:
+            losses["source_loss"] = source_loss
+        losses["loss"] = total_loss
         losses["loss"].backward()
         torch.nn.utils.clip_grad_norm_(
             model.parameters(),
@@ -734,6 +825,12 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
     target_envs = config.target_envs
     if not target_envs:
         raise ValueError("--target-envs required for finetune mode")
+    if config.distal_replay_factor < 1:
+        raise ValueError("--distal-replay-factor must be >= 1")
+    if not (0.0 < config.distal_replay_fraction <= 1.0):
+        raise ValueError("--distal-replay-fraction must be in (0, 1]")
+    if config.source_replay_weight > 0.0 and not config.source_envs:
+        raise ValueError("--source-envs required when --source-replay-weight > 0")
 
     train_loader, val_loader, train_indices = create_few_shot_data_loader(
         data_dir=config.dataset_root,
@@ -745,6 +842,42 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         seed=config.seed,
     )
     print(f"Few-shot train: {len(train_indices)} frames, val: {len(val_loader.dataset)} frames")
+    if config.distal_replay_factor > 1:
+        replay_dataset = build_distal_hard_replay_subset(
+            train_loader.dataset,
+            replay_factor=config.distal_replay_factor,
+            replay_fraction=config.distal_replay_fraction,
+        )
+        train_loader = DataLoader(
+            replay_dataset,
+            batch_size=config.batch_size,
+            shuffle=True,
+            num_workers=config.num_workers,
+            collate_fn=memmap_collate_fn,
+            pin_memory=True,
+            persistent_workers=config.num_workers > 0,
+        )
+        print(
+            "Distal hard replay: "
+            f"{len(replay_dataset)} target samples after factor={config.distal_replay_factor}, "
+            f"fraction={config.distal_replay_fraction:.2f}"
+        )
+
+    source_loader: DataLoader | None = None
+    if config.source_replay_weight > 0.0:
+        source_loader = create_memmap_data_loader(
+            data_dir=config.dataset_root,
+            split="train",
+            batch_size=config.batch_size,
+            envs=config.source_envs,
+            num_workers=config.num_workers,
+            shuffle=True,
+            seed=config.seed,
+        )
+        print(
+            "Source replay: "
+            f"{len(source_loader.dataset)} source frames, weight={config.source_replay_weight:.3f}"
+        )
 
     indices_path = output_dir / "few_shot_train_indices.npy"
     indices_path.parent.mkdir(parents=True, exist_ok=True)
@@ -801,7 +934,7 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
     for epoch in range(1, config.epochs + 1):
         start_time = time.perf_counter()
         train_metrics = run_finetune_epoch(
-            model, train_loader, config, device, optimizer, scheduler
+            model, train_loader, config, device, optimizer, scheduler, source_loader=source_loader
         )
         current_lr = optimizer.param_groups[0]["lr"]
         epoch_time = time.perf_counter() - start_time
@@ -814,6 +947,10 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
             "input_calibration": config.input_calibration,
             "latent_structure_loss_weight": config.latent_structure_loss_weight,
             "encoder_relation_loss_weight": config.encoder_relation_loss_weight,
+            "distal_loss_weight": config.distal_loss_weight,
+            "distal_replay_factor": config.distal_replay_factor,
+            "distal_replay_fraction": config.distal_replay_fraction,
+            "source_replay_weight": config.source_replay_weight,
             "train_loss": train_metrics["loss"],
             "train_coord_loss": train_metrics["coord_loss"],
             "train_bone_loss": train_metrics["bone_loss"],
@@ -824,6 +961,12 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
             row["train_latent_structure_loss"] = train_metrics["latent_structure_loss"]
         if "encoder_relation_loss" in train_metrics:
             row["train_encoder_relation_loss"] = train_metrics["encoder_relation_loss"]
+        if "distal_loss" in train_metrics:
+            row["train_distal_loss"] = train_metrics["distal_loss"]
+        if "target_loss" in train_metrics:
+            row["train_target_loss"] = train_metrics["target_loss"]
+        if "source_loss" in train_metrics:
+            row["train_source_loss"] = train_metrics["source_loss"]
         append_csv_row(log_path, row)
 
         save_checkpoint(
@@ -923,6 +1066,39 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Weight for target-domain encoder feature relation loss. "
             "Default 0 preserves the baseline coordinate and bone losses."
+        ),
+    )
+    parser.add_argument(
+        "--distal-loss-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Extra target-domain loss weight on wrist/knee/ankle joints during finetune. "
+            "Default 0 preserves the baseline full-pose loss."
+        ),
+    )
+    parser.add_argument(
+        "--distal-replay-factor",
+        type=int,
+        default=1,
+        help=(
+            "Repeat target few-shot frames with high distal-joint pose variation during finetune. "
+            "Default 1 disables hard replay."
+        ),
+    )
+    parser.add_argument(
+        "--distal-replay-fraction",
+        type=float,
+        default=0.5,
+        help="Fraction of few-shot target frames selected as hard distal replay samples.",
+    )
+    parser.add_argument(
+        "--source-replay-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for supervised source replay loss during finetune. "
+            "Requires --source-envs when greater than 0."
         ),
     )
     parser.add_argument("--source-envs", nargs="*", default=None, help="Source environment names")
