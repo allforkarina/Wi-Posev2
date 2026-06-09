@@ -6,7 +6,7 @@
 - `data/heatmap_gt.py`: OpenPose18 coordinate conversion utilities (coco17_to_openpose18, valid_point).
 - `pose_targets.py`: Reserved for future pose target utilities.
 - `models/`: PyTorch model code, including the full WiFlow model, optional CSI input calibration, CSI physics feature-bank input transform, CSI spatial encoder with baseline or background-gated stem, symmetric spatio-temporal downsampling, axial attention encoder, multi-layer joint cross-attention decoder, hierarchical joint decoder ablation, and shared OpenPose18 skeleton topology. The active single-frame model path is raw CSI amplitude -> optional input calibration -> optional CSI feature bank -> spatial encoder stem -> symmetric time-frequency residual blocks -> axial encoder -> the configured decoder.
-- `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and CSV logging. Supports `--mode source_only` (single-domain training), `--mode finetune` (cross-domain few-shot finetuning with explicit `--trainable-groups` ablations such as encoder-only, decoder-only, and full finetuning), `--input-calibration none|antenna_subcarrier_affine`, `--csi-feature-mode raw|physics_bank`, `--spatial-stem baseline|background_gated`, optional decoder joint-latent structure supervision via `--latent-structure-loss-weight`, and optional target-domain encoder pose-relation supervision via `--encoder-relation-loss-weight`.
+- `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and CSV logging. Supports `--mode source_only` (single-domain training), `--mode finetune` (cross-domain few-shot finetuning with explicit `--trainable-groups` ablations such as encoder-only, decoder-only, and full finetuning), `--input-calibration none|antenna_subcarrier_affine|antenna_subcarrier_dynamic`, `--csi-feature-mode raw|physics_bank`, `--spatial-stem baseline|background_gated`, optional decoder joint-latent structure supervision via `--latent-structure-loss-weight`, and optional target-domain encoder pose-relation supervision via `--encoder-relation-loss-weight`.
 - `eval.py`: Root-level evaluation entrypoint for loading checkpoints, computing test metrics, and optionally generating research-grade feature visualizations via `--feature-viz`. Supports `--eval-envs` (environment filtering) and `--exclude-indices` (exclude few-shot training frames).
 - `evaluation/`: Evaluation pipeline package.
   - `evaluation/hooks.py`: Forward hook context manager (`WiFlowHookContext`, `wiflow_hooks`) for non-invasive intermediate feature extraction from WiFlow submodules.
@@ -30,6 +30,7 @@ Generated datasets can be large and should not be committed. Keep raw dataset ro
 - Preserve CSI physical dimension semantics where practical. Avoid arbitrary flattening or pooling that mixes antenna, subcarrier, and temporal meanings before the model has selected useful information.
 - Prefer attention-based information selection over destructive pooling for low-SNR CSI features, and use structured supervision such as bone or topology-aware losses in addition to coordinate losses.
 - `--input-calibration antenna_subcarrier_affine` adds a 684-parameter identity-initialized affine layer before any CSI feature-bank expansion: `x'[antenna, subcarrier, time] = exp(log_scale[antenna, subcarrier]) * x + bias[antenna, subcarrier]`. This tests whether cross-domain failure is caused by target-room antenna/subcarrier transfer-function mismatch rather than by decoder pose priors. It preserves temporal structure and should be tested with `--trainable-groups input_calibration` first, then with decoder or encoder combinations.
+- `--input-calibration antenna_subcarrier_dynamic` adds an identity-initialized sample-adaptive calibration layer. It builds per-sample controller features from antenna/subcarrier temporal mean and standard deviation, predicts weights over learnable antenna-subcarrier scale/bias bases, and then applies the resulting calibration uniformly over the time axis. This tests whether the target-room mismatch is pose-conditioned multipath remapping rather than one static affine transfer function. The layer preserves CSI temporal order and should be compared against the static affine variant under matched few-shot indices.
 - `--csi-feature-mode physics_bank` expands the raw 3-channel amplitude tensor to 12 channels by concatenating raw amplitude, temporal residuals, antenna differential responses, and subcarrier gradients. This tests whether cross-domain failure is caused by weak human-induced CSI perturbations being buried under environment-specific static multipath. The raw view remains present, so the ablation adds physically motivated evidence rather than deleting amplitude-scale information.
 - `--spatial-stem background_gated` replaces the baseline antenna-mixing stem with a low-pass temporal background branch, a residual human-perturbation branch, and a learned gate. This tests whether env-specific static/slow multipath dominates the early CSI tokens and should be separated before downsampling. Use `scripts/stem_feature_diagnostic.py` to check whether the background branch remains environment-sensitive while residual/fused features become more pose-correlated.
 - When testing decoder-domain cross-environment adaptation, `--latent-structure-loss-weight` adds a supervised loss on the decoder's final `[B, 18, D]` joint latent states. The loss matches normalized pairwise joint-latent distances to normalized GT pose pairwise distances, encouraging the decoder to preserve per-sample skeleton structure before the coordinate head rather than relying only on final coordinate errors.
@@ -79,6 +80,12 @@ Run target-domain input calibration from a release2.0-style source checkpoint wh
 
 ```powershell
 python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\ft_input_calibration --finetune-from outputs\source_baseline\best_val_mpjpe.pth --input-calibration antenna_subcarrier_affine --trainable-groups input_calibration --few-shot-subjects 4 --few-shot-frames 5 --epochs 50 --batch-size 64
+```
+
+Run dynamic target-domain input calibration when testing whether the target-room remapping depends on the current CSI sample rather than one static antenna/subcarrier affine map:
+
+```powershell
+python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\ft_dynamic_input_calibration --finetune-from outputs\source_baseline\best_val_mpjpe.pth --input-calibration antenna_subcarrier_dynamic --trainable-groups input_calibration --few-shot-subjects 4 --few-shot-frames 5 --epochs 50 --batch-size 64
 ```
 
 Run the background-gated spatial stem ablation when testing whether early CSI tokens need explicit slow-background / residual-perturbation separation before downsampling:
@@ -134,6 +141,9 @@ python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2
 # Optional Phase 3 variant: input calibration only, testing target antenna/subcarrier transfer-function mismatch
 python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\finetune_input_calibration --finetune-from outputs\source_baseline\best_val_mpjpe.pth --input-calibration antenna_subcarrier_affine --trainable-groups input_calibration --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
 
+# Optional Phase 3 variant: dynamic input calibration only, testing pose-conditioned multipath remapping
+python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\finetune_dynamic_input_calibration --finetune-from outputs\source_baseline\best_val_mpjpe.pth --input-calibration antenna_subcarrier_dynamic --trainable-groups input_calibration --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
+
 # Optional Phase 3 variant: Few-shot Finetune from a physics-bank source checkpoint
 python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\finetune_physics_bank --finetune-from outputs\source_physics_bank\best_val_mpjpe.pth --csi-feature-mode physics_bank --trainable-groups encoder --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
 
@@ -159,6 +169,9 @@ python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2
 # Input calibration + decoder: calibrate target CSI transfer function, then adapt pose readout
 python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\ft_input_calibration_decoder --finetune-from outputs\source_baseline\best_val_mpjpe.pth --input-calibration antenna_subcarrier_affine --trainable-groups input_calibration decoder --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
 
+# Dynamic input calibration + decoder: sample-adaptive target CSI calibration, then adapt pose readout
+python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\ft_dynamic_input_calibration_decoder --finetune-from outputs\source_baseline\best_val_mpjpe.pth --input-calibration antenna_subcarrier_dynamic --trainable-groups input_calibration decoder --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
+
 # Decoder-only with joint-latent structure supervision: test whether decoder hidden states preserve target-domain skeleton geometry before the coordinate head
 python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\ft_decoder_latent_w01 --finetune-from outputs\source_baseline\best_val_mpjpe.pth --trainable-groups decoder --latent-structure-loss-weight 0.1 --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
 
@@ -170,6 +183,9 @@ python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2
 
 # Input calibration + full finetune: upper-bound comparison with explicit target transfer-function calibration
 python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\ft_input_calibration_full --finetune-from outputs\source_baseline\best_val_mpjpe.pth --input-calibration antenna_subcarrier_affine --trainable-groups input_calibration full --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
+
+# Dynamic input calibration + full finetune: upper-bound comparison for sample-adaptive target CSI calibration
+python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\ft_dynamic_input_calibration_full --finetune-from outputs\source_baseline\best_val_mpjpe.pth --input-calibration antenna_subcarrier_dynamic --trainable-groups full --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
 
 # Fine-grained combinations for parameter-budget or mechanism analysis
 python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\ft_spatial_axial_attn --finetune-from outputs\source_baseline\best_val_mpjpe.pth --trainable-groups spatial_encoder axial_attention --epochs 30

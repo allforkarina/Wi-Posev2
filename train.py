@@ -900,7 +900,8 @@ def parse_args() -> argparse.Namespace:
         choices=CSI_INPUT_CALIBRATION_TYPES,
         help=(
             "Optional CSI input calibration before feature-bank expansion. "
-            "antenna_subcarrier_affine learns per-antenna/subcarrier scale and bias."
+            "antenna_subcarrier_affine learns static per-antenna/subcarrier scale and bias; "
+            "antenna_subcarrier_dynamic predicts sample-adaptive calibration from CSI statistics."
         ),
     )
     parser.add_argument("--epochs", type=int, default=50)

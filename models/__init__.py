@@ -2,6 +2,7 @@ from .csi_feature_bank import CSI_FEATURE_MODES, build_csi_feature_bank, csi_fea
 from .csi_input_calibration import (
     CSI_INPUT_CALIBRATION_TYPES,
     AntennaSubcarrierAffineCalibration,
+    DynamicAntennaSubcarrierCalibration,
     build_csi_input_calibration,
 )
 from .skeleton import NUM_OPENPOSE_KEYPOINTS, OPENPOSE_BONE_EDGES, build_normalized_adjacency
@@ -24,6 +25,7 @@ __all__ = [
     "CSI_FEATURE_MODES",
     "CSI_INPUT_CALIBRATION_TYPES",
     "AntennaSubcarrierAffineCalibration",
+    "DynamicAntennaSubcarrierCalibration",
     "build_csi_feature_bank",
     "build_csi_input_calibration",
     "csi_feature_input_channels",
