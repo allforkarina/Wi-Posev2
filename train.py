@@ -16,7 +16,14 @@ from torch.optim.lr_scheduler import LRScheduler, OneCycleLR
 from torch.utils.data import DataLoader, Subset
 
 from dataloader import create_few_shot_data_loader, create_memmap_data_loader, create_memmap_data_loaders
-from models import AXIAL_ENCODER_MODES, CSI_FEATURE_MODES, DECODER_TYPES, OPENPOSE_BONE_EDGES, WiFlowModel
+from models import (
+    AXIAL_ENCODER_MODES,
+    CSI_FEATURE_MODES,
+    DECODER_TYPES,
+    OPENPOSE_BONE_EDGES,
+    SPATIAL_STEM_TYPES,
+    WiFlowModel,
+)
 
 
 PCK_THRESHOLDS: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5)
@@ -55,6 +62,8 @@ class TrainConfig:
     axial_mode: str = "spatial_then_temporal"
     decoder_type: str = "joint"
     csi_feature_mode: str = "raw"
+    spatial_stem_type: str = "baseline"
+    background_kernel_size: int = 9
     epochs: int = 50
     batch_size: int = 64
     lr: float = 2e-5
@@ -568,6 +577,8 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
         axial_mode=config.axial_mode,
         decoder_type=config.decoder_type,
         csi_feature_mode=config.csi_feature_mode,
+        spatial_stem_type=config.spatial_stem_type,
+        background_kernel_size=config.background_kernel_size,
     ).to(device)
     optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     scheduler = OneCycleLR(
@@ -617,6 +628,8 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
             "axial_mode": config.axial_mode,
             "decoder_type": config.decoder_type,
             "csi_feature_mode": config.csi_feature_mode,
+            "spatial_stem_type": config.spatial_stem_type,
+            "background_kernel_size": config.background_kernel_size,
             "latent_structure_loss_weight": config.latent_structure_loss_weight,
             "encoder_relation_loss_weight": config.encoder_relation_loss_weight,
             "train_loss": train_metrics["loss"],
@@ -713,6 +726,8 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         axial_mode=config.axial_mode,
         decoder_type=config.decoder_type,
         csi_feature_mode=config.csi_feature_mode,
+        spatial_stem_type=config.spatial_stem_type,
+        background_kernel_size=config.background_kernel_size,
     ).to(device)
     if "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -761,6 +776,8 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         row: Dict[str, float | int | str] = {
             "epoch": epoch,
             "csi_feature_mode": config.csi_feature_mode,
+            "spatial_stem_type": config.spatial_stem_type,
+            "background_kernel_size": config.background_kernel_size,
             "latent_structure_loss_weight": config.latent_structure_loss_weight,
             "encoder_relation_loss_weight": config.encoder_relation_loss_weight,
             "train_loss": train_metrics["loss"],
@@ -826,6 +843,22 @@ def parse_args() -> argparse.Namespace:
             "CSI input representation before the spatial encoder. "
             "raw preserves the 3-channel baseline; physics_bank expands to 12 channels."
         ),
+    )
+    parser.add_argument(
+        "--spatial-stem",
+        dest="spatial_stem_type",
+        default="baseline",
+        choices=SPATIAL_STEM_TYPES,
+        help=(
+            "Spatial encoder stem. baseline preserves the release2.0 front-end; "
+            "background_gated separates slow temporal CSI background from residual perturbations."
+        ),
+    )
+    parser.add_argument(
+        "--background-kernel-size",
+        type=int,
+        default=9,
+        help="Odd temporal kernel size for the background_gated low-pass branch.",
     )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=64)

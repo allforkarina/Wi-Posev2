@@ -21,6 +21,8 @@ class WiFlowModel(nn.Module):
         axial_mode: str = "spatial_then_temporal",
         decoder_type: str = "joint",
         csi_feature_mode: str = "raw",
+        spatial_stem_type: str = "baseline",
+        background_kernel_size: int = 9,
     ) -> None:
         super().__init__()
         if decoder_type not in DECODER_TYPES:
@@ -33,8 +35,14 @@ class WiFlowModel(nn.Module):
         self.axial_mode = axial_mode
         self.decoder_type = decoder_type
         self.csi_feature_mode = csi_feature_mode
+        self.spatial_stem_type = spatial_stem_type
+        self.background_kernel_size = background_kernel_size
         self.encoder_input_channels = csi_feature_input_channels(csi_feature_mode)
-        self.spatial_encoder = WiFlowSpatialEncoder(input_channels=self.encoder_input_channels)
+        self.spatial_encoder = WiFlowSpatialEncoder(
+            input_channels=self.encoder_input_channels,
+            stem_type=spatial_stem_type,
+            background_kernel_size=background_kernel_size,
+        )
         self.axial_encoder = WiFlowAxialEncoder(mode=axial_mode)
         if decoder_type == "joint":
             self.decoder = WiFlowJointDecoder()

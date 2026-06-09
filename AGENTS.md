@@ -5,8 +5,8 @@
 - `data/memmap_dataset.py`: NPY memmap dataset reader that loads CSI amplitude, OpenPose18 keypoints, and metadata from `.npy`/`.npz` files with zero-copy OS-cached I/O.
 - `data/heatmap_gt.py`: OpenPose18 coordinate conversion utilities (coco17_to_openpose18, valid_point).
 - `pose_targets.py`: Reserved for future pose target utilities.
-- `models/`: PyTorch model code, including the full WiFlow model, CSI physics feature-bank input transform, CSI spatial encoder with symmetric spatio-temporal downsampling, axial attention encoder, multi-layer joint cross-attention decoder, hierarchical joint decoder ablation, and shared OpenPose18 skeleton topology. The active single-frame model path is raw CSI amplitude -> optional CSI feature bank -> spatial encoder with antenna mixing, feature stem, and symmetric time-frequency residual blocks -> axial encoder -> the configured decoder.
-- `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and CSV logging. Supports `--mode source_only` (single-domain training), `--mode finetune` (cross-domain few-shot finetuning with explicit `--trainable-groups` ablations such as encoder-only, decoder-only, and full finetuning), `--csi-feature-mode raw|physics_bank`, optional decoder joint-latent structure supervision via `--latent-structure-loss-weight`, and optional target-domain encoder pose-relation supervision via `--encoder-relation-loss-weight`.
+- `models/`: PyTorch model code, including the full WiFlow model, CSI physics feature-bank input transform, CSI spatial encoder with baseline or background-gated stem, symmetric spatio-temporal downsampling, axial attention encoder, multi-layer joint cross-attention decoder, hierarchical joint decoder ablation, and shared OpenPose18 skeleton topology. The active single-frame model path is raw CSI amplitude -> optional CSI feature bank -> spatial encoder stem -> symmetric time-frequency residual blocks -> axial encoder -> the configured decoder.
+- `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and CSV logging. Supports `--mode source_only` (single-domain training), `--mode finetune` (cross-domain few-shot finetuning with explicit `--trainable-groups` ablations such as encoder-only, decoder-only, and full finetuning), `--csi-feature-mode raw|physics_bank`, `--spatial-stem baseline|background_gated`, optional decoder joint-latent structure supervision via `--latent-structure-loss-weight`, and optional target-domain encoder pose-relation supervision via `--encoder-relation-loss-weight`.
 - `eval.py`: Root-level evaluation entrypoint for loading checkpoints, computing test metrics, and optionally generating research-grade feature visualizations via `--feature-viz`. Supports `--eval-envs` (environment filtering) and `--exclude-indices` (exclude few-shot training frames).
 - `evaluation/`: Evaluation pipeline package.
   - `evaluation/hooks.py`: Forward hook context manager (`WiFlowHookContext`, `wiflow_hooks`) for non-invasive intermediate feature extraction from WiFlow submodules.
@@ -16,6 +16,7 @@
   - `scripts/build_memmap.py`: Command-line wrapper that builds an NPY memmap dataset from the raw MM-Fi directory structure.
   - `scripts/build_groundtruth.py`: Builds ground-truth keypoint statistics and visualizations.
   - `scripts/visualize_gt.py`: Visualizes ground-truth pose annotations overlaid on corresponding video frames.
+  - `scripts/stem_feature_diagnostic.py`: Loads a checkpoint and summarizes spatial-stem background/residual/gate diagnostics, including environment mean gaps and pose-distance correlations.
 - `tests/`: `pytest` unit tests. Mirror module names such as `tests/test_dataloader.py`, `tests/test_wiflow_model.py`, or `tests/test_wiflow_decoder.py`.
 - `.gitignore`: Excludes Python caches, local environments, generated datasets, checkpoints, and editor files from Git.
 
@@ -29,6 +30,7 @@ Generated datasets can be large and should not be committed. Keep raw dataset ro
 - Preserve CSI physical dimension semantics where practical. Avoid arbitrary flattening or pooling that mixes antenna, subcarrier, and temporal meanings before the model has selected useful information.
 - Prefer attention-based information selection over destructive pooling for low-SNR CSI features, and use structured supervision such as bone or topology-aware losses in addition to coordinate losses.
 - `--csi-feature-mode physics_bank` expands the raw 3-channel amplitude tensor to 12 channels by concatenating raw amplitude, temporal residuals, antenna differential responses, and subcarrier gradients. This tests whether cross-domain failure is caused by weak human-induced CSI perturbations being buried under environment-specific static multipath. The raw view remains present, so the ablation adds physically motivated evidence rather than deleting amplitude-scale information.
+- `--spatial-stem background_gated` replaces the baseline antenna-mixing stem with a low-pass temporal background branch, a residual human-perturbation branch, and a learned gate. This tests whether env-specific static/slow multipath dominates the early CSI tokens and should be separated before downsampling. Use `scripts/stem_feature_diagnostic.py` to check whether the background branch remains environment-sensitive while residual/fused features become more pose-correlated.
 - When testing decoder-domain cross-environment adaptation, `--latent-structure-loss-weight` adds a supervised loss on the decoder's final `[B, 18, D]` joint latent states. The loss matches normalized pairwise joint-latent distances to normalized GT pose pairwise distances, encouraging the decoder to preserve per-sample skeleton structure before the coordinate head rather than relying only on final coordinate errors.
 - When testing encoder-domain target adaptation, `--encoder-relation-loss-weight` adds a target-batch relational loss between pooled axial encoder features and GT pose distances. This does not force source and target CSI features to be equal; it only asks target-domain encoder features to preserve pose-neighborhood structure within the target room.
 
@@ -72,6 +74,12 @@ Run the physics-bank input representation ablation when testing whether target-d
 python train.py --mode source_only --dataset-root data\mmfi_pose --source-envs env1 --output-dir outputs\source_env1_physics_bank --csi-feature-mode physics_bank --epochs 50 --batch-size 64
 ```
 
+Run the background-gated spatial stem ablation when testing whether early CSI tokens need explicit slow-background / residual-perturbation separation before downsampling:
+
+```powershell
+python train.py --mode source_only --dataset-root data\mmfi_pose --source-envs env1 --output-dir outputs\source_env1_background_gated --spatial-stem background_gated --background-kernel-size 9 --epochs 50 --batch-size 64
+```
+
 Run an axial-attention encoder ablation:
 
 ```powershell
@@ -92,6 +100,12 @@ Evaluate one checkpoint:
 python eval.py --dataset-root data\mmfi_pose --checkpoint outputs\train\best_val_mpjpe.pth --output-dir outputs\eval
 ```
 
+Diagnose one background-gated checkpoint:
+
+```powershell
+python scripts\stem_feature_diagnostic.py --dataset-root data\mmfi_pose --checkpoint outputs\source_env1_background_gated\best_val_mpjpe.pth --source-envs env1 --target-envs env2 --output-dir outputs\source_env1_background_gated_stem_diag --max-samples 2048
+```
+
 ### Cross-Domain Few-Shot Finetune Pipeline
 
 ```powershell
@@ -101,6 +115,9 @@ python train.py --mode source_only --dataset-root data\mmfi_pose --source-envs e
 # Optional Phase 1 variant: Source-only Training with physics-bank input
 python train.py --mode source_only --dataset-root data\mmfi_pose --source-envs env1 --output-dir outputs\source_physics_bank --csi-feature-mode physics_bank --epochs 50
 
+# Optional Phase 1 variant: Source-only Training with background-gated spatial stem
+python train.py --mode source_only --dataset-root data\mmfi_pose --source-envs env1 --output-dir outputs\source_background_gated --spatial-stem background_gated --background-kernel-size 9 --epochs 50
+
 # Phase 2: Baseline Evaluation
 python eval.py --dataset-root data\mmfi_pose --checkpoint outputs\source_baseline\best_val_mpjpe.pth --eval-envs env2 --output-dir outputs\baseline_eval
 
@@ -109,6 +126,9 @@ python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2
 
 # Optional Phase 3 variant: Few-shot Finetune from a physics-bank source checkpoint
 python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\finetune_physics_bank --finetune-from outputs\source_physics_bank\best_val_mpjpe.pth --csi-feature-mode physics_bank --trainable-groups encoder --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
+
+# Optional Phase 3 variant: Few-shot Finetune from a background-gated source checkpoint
+python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\finetune_background_gated --finetune-from outputs\source_background_gated\best_val_mpjpe.pth --spatial-stem background_gated --background-kernel-size 9 --trainable-groups decoder --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
 
 # Phase 4: Post-FT Evaluation
 python eval.py --dataset-root data\mmfi_pose --checkpoint outputs\finetune\best_train_loss.pth --eval-envs env2 --output-dir outputs\finetune_eval --exclude-indices outputs\finetune\few_shot_train_indices.npy

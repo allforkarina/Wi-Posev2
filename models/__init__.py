@@ -4,7 +4,7 @@ from .wiflow_axial_encoder import AXIAL_ENCODER_MODES, WiFlowAxialEncoder
 from .wiflow_hierarchical_joint_decoder import WiFlowHierarchicalJointDecoder
 from .wiflow_joint_decoder import WiFlowJointDecoder
 from .wiflow_model import DECODER_TYPES, WiFlowModel
-from .wiflow_spatial_encoder import WiFlowSpatialEncoder
+from .wiflow_spatial_encoder import BackgroundGatedSpatialStem, SPATIAL_STEM_TYPES, WiFlowSpatialEncoder
 
 __all__ = [
     "WiFlowModel",
@@ -12,8 +12,10 @@ __all__ = [
     "WiFlowAxialEncoder",
     "AXIAL_ENCODER_MODES",
     "DECODER_TYPES",
+    "SPATIAL_STEM_TYPES",
     "WiFlowJointDecoder",
     "WiFlowHierarchicalJointDecoder",
+    "BackgroundGatedSpatialStem",
     "CSI_FEATURE_MODES",
     "build_csi_feature_bank",
     "csi_feature_input_channels",
