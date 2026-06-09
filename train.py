@@ -37,6 +37,7 @@ PCK_THRESHOLDS: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5)
 RIGHT_SHOULDER_INDEX = 2
 LEFT_HIP_INDEX = 11
 DISTAL_SUPERVISION_JOINTS: tuple[int, ...] = (4, 7, 9, 10, 12, 13)
+WRIST_DIRECTION_EDGES: tuple[tuple[int, int], ...] = ((8, 10), (12, 13))
 TRAINABLE_GROUPS: tuple[str, ...] = (
     "encoder",
     "decoder",
@@ -87,6 +88,7 @@ class TrainConfig:
     distal_replay_factor: int = 1
     distal_replay_fraction: float = 0.5
     source_replay_weight: float = 0.0
+    wrist_direction_loss_weight: float = 0.0
     num_workers: int = 4
     device: str = "cuda"
     seed: int = 42
@@ -137,6 +139,20 @@ def distal_joint_loss(
         prediction[:, joint_index] - target[:, joint_index],
         dim=-1,
     ).mean()
+
+
+def wrist_direction_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    edges: tuple[tuple[int, int], ...] = WRIST_DIRECTION_EDGES,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    edge_index = torch.as_tensor(edges, dtype=torch.long, device=prediction.device)
+    pred_vectors = prediction[:, edge_index[:, 1]] - prediction[:, edge_index[:, 0]]
+    target_vectors = target[:, edge_index[:, 1]] - target[:, edge_index[:, 0]]
+    pred_direction = F.normalize(pred_vectors, dim=-1, eps=eps)
+    target_direction = F.normalize(target_vectors, dim=-1, eps=eps)
+    return torch.linalg.vector_norm(pred_direction - target_direction, dim=-1).mean()
 
 
 def _dataset_keypoints(dataset: torch.utils.data.Dataset, index: int) -> torch.Tensor:
@@ -432,6 +448,13 @@ def run_finetune_epoch(
             distal = distal_joint_loss(prediction, target)
             losses["distal_loss"] = distal
             losses["loss"] = losses["loss"] + criterion_config.distal_loss_weight * distal
+        if criterion_config.wrist_direction_loss_weight > 0.0:
+            wrist_direction = wrist_direction_loss(prediction, target)
+            losses["wrist_direction_loss"] = wrist_direction
+            losses["loss"] = (
+                losses["loss"]
+                + criterion_config.wrist_direction_loss_weight * wrist_direction
+            )
 
         target_loss = losses["loss"]
         total_loss = target_loss
@@ -951,6 +974,7 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
             "distal_replay_factor": config.distal_replay_factor,
             "distal_replay_fraction": config.distal_replay_fraction,
             "source_replay_weight": config.source_replay_weight,
+            "wrist_direction_loss_weight": config.wrist_direction_loss_weight,
             "train_loss": train_metrics["loss"],
             "train_coord_loss": train_metrics["coord_loss"],
             "train_bone_loss": train_metrics["bone_loss"],
@@ -963,6 +987,8 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
             row["train_encoder_relation_loss"] = train_metrics["encoder_relation_loss"]
         if "distal_loss" in train_metrics:
             row["train_distal_loss"] = train_metrics["distal_loss"]
+        if "wrist_direction_loss" in train_metrics:
+            row["train_wrist_direction_loss"] = train_metrics["wrist_direction_loss"]
         if "target_loss" in train_metrics:
             row["train_target_loss"] = train_metrics["target_loss"]
         if "source_loss" in train_metrics:
@@ -1099,6 +1125,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Weight for supervised source replay loss during finetune. "
             "Requires --source-envs when greater than 0."
+        ),
+    )
+    parser.add_argument(
+        "--wrist-direction-loss-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Extra target-domain direction loss on custom wrist chains (8->10 and 12->13). "
+            "Default 0 disables this loss."
         ),
     )
     parser.add_argument("--source-envs", nargs="*", default=None, help="Source environment names")

@@ -12,10 +12,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from train import (  # noqa: E402
     DISTAL_SUPERVISION_JOINTS,
+    WRIST_DIRECTION_EDGES,
     TrainConfig,
     build_distal_hard_replay_subset,
     distal_joint_loss,
     run_finetune_epoch,
+    wrist_direction_loss,
 )
 
 
@@ -72,6 +74,41 @@ def test_distal_joint_loss_ignores_non_distal_coordinates() -> None:
     assert loss == pytest.approx(torch.tensor(1.0))
 
 
+def test_wrist_direction_loss_uses_custom_wrist_edges_and_ignores_length() -> None:
+    prediction = torch.zeros(1, 18, 2)
+    target = torch.zeros(1, 18, 2)
+    prediction[:, 8] = torch.tensor([0.0, 0.0])
+    prediction[:, 10] = torch.tensor([1.0, 0.0])
+    target[:, 8] = torch.tensor([0.0, 0.0])
+    target[:, 10] = torch.tensor([3.0, 0.0])
+    prediction[:, 12] = torch.tensor([0.0, 0.0])
+    prediction[:, 13] = torch.tensor([0.0, 2.0])
+    target[:, 12] = torch.tensor([0.0, 0.0])
+    target[:, 13] = torch.tensor([0.0, 4.0])
+
+    loss = wrist_direction_loss(prediction, target)
+
+    assert WRIST_DIRECTION_EDGES == ((8, 10), (12, 13))
+    assert loss == pytest.approx(torch.tensor(0.0))
+
+
+def test_wrist_direction_loss_penalizes_wrong_arm_chain_direction() -> None:
+    prediction = torch.zeros(1, 18, 2)
+    target = torch.zeros(1, 18, 2)
+    prediction[:, 8] = torch.tensor([0.0, 0.0])
+    prediction[:, 10] = torch.tensor([1.0, 0.0])
+    target[:, 8] = torch.tensor([0.0, 0.0])
+    target[:, 10] = torch.tensor([0.0, 1.0])
+    prediction[:, 12] = torch.tensor([0.0, 0.0])
+    prediction[:, 13] = torch.tensor([0.0, 1.0])
+    target[:, 12] = torch.tensor([0.0, 0.0])
+    target[:, 13] = torch.tensor([0.0, 1.0])
+
+    loss = wrist_direction_loss(prediction, target)
+
+    assert loss > 0.0
+
+
 def test_distal_hard_replay_repeats_high_distal_variation_frames() -> None:
     dataset = TinyPoseDataset([0.0, 0.1, 4.0, 0.2])
 
@@ -114,3 +151,25 @@ def test_finetune_epoch_logs_distal_and_source_replay_losses() -> None:
     assert "source_loss" in metrics
     assert "distal_loss" in metrics
     assert metrics["loss"] > metrics["target_loss"]
+
+
+def test_finetune_epoch_logs_wrist_direction_loss() -> None:
+    model = TinyPoseModel()
+    optimizer = AdamW(model.parameters(), lr=1e-3)
+    config = TrainConfig(
+        dataset_root="unused",
+        mode="finetune",
+        wrist_direction_loss_weight=1.0,
+    )
+    target_loader = [_batch(target_value=1.0)]
+
+    metrics = run_finetune_epoch(
+        model,
+        target_loader,
+        config,
+        torch.device("cpu"),
+        optimizer,
+    )
+
+    assert "wrist_direction_loss" in metrics
+    assert metrics["loss"] > metrics["target_loss"] - 1e-6
