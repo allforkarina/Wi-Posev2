@@ -19,6 +19,7 @@ from dataloader import create_few_shot_data_loader, create_memmap_data_loader, c
 from models import (
     AXIAL_ENCODER_MODES,
     CSI_FEATURE_MODES,
+    CSI_INPUT_CALIBRATION_TYPES,
     DECODER_TYPES,
     OPENPOSE_BONE_EDGES,
     SPATIAL_STEM_TYPES,
@@ -33,6 +34,7 @@ TRAINABLE_GROUPS: tuple[str, ...] = (
     "encoder",
     "decoder",
     "full",
+    "input_calibration",
     "spatial_encoder",
     "axial_encoder",
     "axial_attention",
@@ -64,6 +66,7 @@ class TrainConfig:
     csi_feature_mode: str = "raw"
     spatial_stem_type: str = "baseline"
     background_kernel_size: int = 9
+    input_calibration: str = "none"
     epochs: int = 50
     batch_size: int = 64
     lr: float = 2e-5
@@ -454,6 +457,8 @@ def _matches_trainable_group(
         return name.startswith("decoder.")
     if group == "full":
         return True
+    if group == "input_calibration":
+        return name.startswith("input_calibration.")
     if group == "spatial_encoder":
         return name.startswith("spatial_encoder.")
     if group == "axial_encoder":
@@ -519,6 +524,31 @@ def apply_trainable_groups(model: nn.Module, groups: tuple[str, ...]) -> int:
     return trainable_params
 
 
+def load_finetune_state_dict(
+    model: nn.Module,
+    state_dict: Mapping[str, torch.Tensor],
+) -> torch.nn.modules.module._IncompatibleKeys:
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    allowed_missing = {
+        name
+        for name, _ in model.named_parameters()
+        if name.startswith("input_calibration.")
+    }
+    unexpected = list(incompatible.unexpected_keys)
+    missing = [name for name in incompatible.missing_keys if name not in allowed_missing]
+    if missing or unexpected:
+        raise RuntimeError(
+            "Checkpoint does not match the requested model architecture. "
+            f"Missing keys: {missing}; unexpected keys: {unexpected}"
+        )
+    if incompatible.missing_keys:
+        print(
+            "Initialized new input calibration parameters: "
+            f"{tuple(incompatible.missing_keys)}"
+        )
+    return incompatible
+
+
 def apply_finetune_tier(model: nn.Module, tier: int = 1) -> int:
     trainable_params = 0
     if tier == 1:
@@ -579,6 +609,7 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
         csi_feature_mode=config.csi_feature_mode,
         spatial_stem_type=config.spatial_stem_type,
         background_kernel_size=config.background_kernel_size,
+        input_calibration=config.input_calibration,
     ).to(device)
     optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     scheduler = OneCycleLR(
@@ -630,6 +661,7 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
             "csi_feature_mode": config.csi_feature_mode,
             "spatial_stem_type": config.spatial_stem_type,
             "background_kernel_size": config.background_kernel_size,
+            "input_calibration": config.input_calibration,
             "latent_structure_loss_weight": config.latent_structure_loss_weight,
             "encoder_relation_loss_weight": config.encoder_relation_loss_weight,
             "train_loss": train_metrics["loss"],
@@ -728,11 +760,12 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         csi_feature_mode=config.csi_feature_mode,
         spatial_stem_type=config.spatial_stem_type,
         background_kernel_size=config.background_kernel_size,
+        input_calibration=config.input_calibration,
     ).to(device)
     if "model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["model_state_dict"])
+        load_finetune_state_dict(model, checkpoint["model_state_dict"])
     else:
-        model.load_state_dict(checkpoint)
+        load_finetune_state_dict(model, checkpoint)
     if config.freeze_tier is not None:
         apply_finetune_tier(model, tier=config.freeze_tier)
     else:
@@ -778,6 +811,7 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
             "csi_feature_mode": config.csi_feature_mode,
             "spatial_stem_type": config.spatial_stem_type,
             "background_kernel_size": config.background_kernel_size,
+            "input_calibration": config.input_calibration,
             "latent_structure_loss_weight": config.latent_structure_loss_weight,
             "encoder_relation_loss_weight": config.encoder_relation_loss_weight,
             "train_loss": train_metrics["loss"],
@@ -860,6 +894,15 @@ def parse_args() -> argparse.Namespace:
         default=9,
         help="Odd temporal kernel size for the background_gated low-pass branch.",
     )
+    parser.add_argument(
+        "--input-calibration",
+        default="none",
+        choices=CSI_INPUT_CALIBRATION_TYPES,
+        help=(
+            "Optional CSI input calibration before feature-bank expansion. "
+            "antenna_subcarrier_affine learns per-antenna/subcarrier scale and bias."
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -895,7 +938,7 @@ def parse_args() -> argparse.Namespace:
             "Parameter groups to train during finetune. Main ablations: encoder, "
             "decoder, full. Fine-grained groups include spatial_encoder, "
             "axial_encoder, axial_attention, axial_projection, decoder_queries, "
-            "decoder_attention, decoder_head, decoder_norms, norms."
+            "decoder_attention, decoder_head, decoder_norms, input_calibration, norms."
         ),
     )
     parser.add_argument(

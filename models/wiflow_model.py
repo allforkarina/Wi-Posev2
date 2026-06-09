@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from .csi_feature_bank import CSI_FEATURE_MODES, build_csi_feature_bank, csi_feature_input_channels
+from .csi_input_calibration import CSI_INPUT_CALIBRATION_TYPES, build_csi_input_calibration
 from .wiflow_axial_encoder import WiFlowAxialEncoder
 from .wiflow_hierarchical_joint_decoder import WiFlowHierarchicalJointDecoder
 from .wiflow_joint_decoder import WiFlowJointDecoder
@@ -23,6 +24,7 @@ class WiFlowModel(nn.Module):
         csi_feature_mode: str = "raw",
         spatial_stem_type: str = "baseline",
         background_kernel_size: int = 9,
+        input_calibration: str = "none",
     ) -> None:
         super().__init__()
         if decoder_type not in DECODER_TYPES:
@@ -31,12 +33,16 @@ class WiFlowModel(nn.Module):
             raise ValueError("WiFlowModel expects three raw CSI amplitude channels before feature-bank expansion")
         if csi_feature_mode not in CSI_FEATURE_MODES:
             raise ValueError(f"csi_feature_mode must be one of {CSI_FEATURE_MODES}")
+        if input_calibration not in CSI_INPUT_CALIBRATION_TYPES:
+            raise ValueError(f"input_calibration must be one of {CSI_INPUT_CALIBRATION_TYPES}")
         self.input_channels = input_channels
         self.axial_mode = axial_mode
         self.decoder_type = decoder_type
         self.csi_feature_mode = csi_feature_mode
         self.spatial_stem_type = spatial_stem_type
         self.background_kernel_size = background_kernel_size
+        self.input_calibration_type = input_calibration
+        self.input_calibration = build_csi_input_calibration(input_calibration)
         self.encoder_input_channels = csi_feature_input_channels(csi_feature_mode)
         self.spatial_encoder = WiFlowSpatialEncoder(
             input_channels=self.encoder_input_channels,
@@ -52,6 +58,7 @@ class WiFlowModel(nn.Module):
     def encode_features(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 4:
             raise ValueError("WiFlowModel expects input shaped [B, 3, 114, 64]")
+        x = self.input_calibration(x)
         x = build_csi_feature_bank(x, mode=self.csi_feature_mode)
         x = self.spatial_encoder(x)
         return self.axial_encoder(x)

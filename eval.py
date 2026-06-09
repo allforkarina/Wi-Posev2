@@ -53,6 +53,7 @@ def load_checkpoint_model(
         csi_feature_mode=str(train_config.get("csi_feature_mode", "raw")),
         spatial_stem_type=str(train_config.get("spatial_stem_type", "baseline")),
         background_kernel_size=int(train_config.get("background_kernel_size", 9)),
+        input_calibration=str(train_config.get("input_calibration", "none")),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
