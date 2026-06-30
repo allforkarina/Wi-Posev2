@@ -336,7 +336,10 @@ def pck(
 
 
 def compute_metrics(prediction: torch.Tensor, target: torch.Tensor) -> Dict[str, torch.Tensor]:
-    metrics = {"mpjpe": mpjpe(prediction, target)}
+    metrics = {
+        "mpjpe": mpjpe(prediction, target),
+        "bone_error": bone_length_loss(prediction, target),
+    }
     for threshold in PCK_THRESHOLDS:
         metrics[f"pck_{threshold:.1f}".replace(".", "_")] = pck(prediction, target, threshold)
     return metrics
@@ -484,6 +487,7 @@ def run_finetune_epoch(
         if source_loss is not None:
             losses["source_loss"] = source_loss
         losses["loss"] = total_loss
+        metrics = compute_metrics(prediction.detach(), target)
         losses["loss"].backward()
         torch.nn.utils.clip_grad_norm_(
             model.parameters(),
@@ -495,7 +499,7 @@ def run_finetune_epoch(
 
         batch_size = target.shape[0]
         sample_count += batch_size
-        for name, value in losses.items():
+        for name, value in {**losses, **metrics}.items():
             totals[name] = totals.get(name, 0.0) + float(value.detach().cpu()) * batch_size
 
     return average_meter_totals(totals, sample_count)
@@ -532,6 +536,41 @@ def append_csv_row(path: Path, row: Mapping[str, float | int | str]) -> None:
         if write_header:
             writer.writeheader()
         writer.writerow(row)
+
+
+def append_epoch_metric_csvs(
+    output_dir: Path,
+    epoch: int,
+    train_metrics: Mapping[str, float],
+    val_metrics: Mapping[str, float] | None = None,
+) -> None:
+    loss_names = (
+        "loss",
+        "coord_loss",
+        "bone_loss",
+        "latent_structure_loss",
+        "encoder_relation_loss",
+        "distal_loss",
+        "wrist_direction_loss",
+        "target_loss",
+        "source_loss",
+    )
+
+    def build_row(metric_names: tuple[str, ...]) -> Dict[str, float | int]:
+        row: Dict[str, float | int] = {"epoch": epoch}
+        for name in metric_names:
+            if name in train_metrics:
+                row[f"train_{name}"] = train_metrics[name]
+            if val_metrics is not None and name in val_metrics:
+                row[f"val_{name}"] = val_metrics[name]
+        return row
+
+    append_csv_row(output_dir / "loss.csv", build_row(loss_names))
+    append_csv_row(output_dir / "mpjpe.csv", build_row(("mpjpe",)))
+    append_csv_row(output_dir / "bone_error.csv", build_row(("bone_error",)))
+    for threshold in PCK_THRESHOLDS:
+        metric_name = f"pck_{threshold:.1f}".replace(".", "_")
+        append_csv_row(output_dir / f"{metric_name}.csv", build_row((metric_name,)))
 
 
 def maybe_subset_loader(loader: DataLoader, subset_size: int | None) -> DataLoader:
@@ -807,6 +846,7 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
         if "encoder_relation_loss" in val_metrics:
             row["val_encoder_relation_loss"] = val_metrics["encoder_relation_loss"]
         append_csv_row(log_path, row)
+        append_epoch_metric_csvs(output_dir, epoch, train_metrics, val_metrics)
 
         save_checkpoint(
             output_dir / "last.pth",
@@ -1004,6 +1044,7 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         if "source_loss" in train_metrics:
             row["train_source_loss"] = train_metrics["source_loss"]
         append_csv_row(log_path, row)
+        append_epoch_metric_csvs(output_dir, epoch, train_metrics)
 
         save_checkpoint(
             output_dir / f"epoch_{epoch:03d}.pth",

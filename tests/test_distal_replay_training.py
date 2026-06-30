@@ -151,6 +151,15 @@ def test_finetune_epoch_logs_distal_and_source_replay_losses() -> None:
     assert "source_loss" in metrics
     assert "distal_loss" in metrics
     assert metrics["loss"] > metrics["target_loss"]
+    assert {
+        "mpjpe",
+        "bone_error",
+        "pck_0_1",
+        "pck_0_2",
+        "pck_0_3",
+        "pck_0_4",
+        "pck_0_5",
+    } <= metrics.keys()
 
 
 def test_finetune_epoch_logs_wrist_direction_loss() -> None:

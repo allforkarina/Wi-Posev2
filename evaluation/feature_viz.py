@@ -131,17 +131,13 @@ def _set_figure_context(
     )
 
 
-_OUTPUT_FORMAT = "both"
 _FIGURE_WIDTH: float | None = None
 _FIGURE_HEIGHT: float | None = None
 
 
 def _save_fig(fig: plt.Figure, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if _OUTPUT_FORMAT in ("pdf", "both"):
-        fig.savefig(str(path.with_suffix(".pdf")), dpi=300)
-    if _OUTPUT_FORMAT in ("png", "both"):
-        fig.savefig(str(path.with_suffix(".png")), dpi=300)
+    fig.savefig(str(path.with_suffix(".png")), dpi=300)
     plt.close(fig)
 
 
@@ -962,7 +958,6 @@ def run_feature_visualization(
     num_action_samples: int = 3,
     batch_size: int = 64,
     num_workers: int = 0,
-    output_format: str = "both",
     figure_width: float | None = None,
     figure_height: float | None = None,
 ) -> None:
@@ -988,15 +983,12 @@ def run_feature_visualization(
         Retained for eval.py API compatibility.
     num_workers : int
         Retained for eval.py API compatibility.
-    output_format : str
-        ``"png"``, ``"pdf"``, or ``"both"`` (default).
     figure_width : float | None
         Override default figure width in inches.
     figure_height : float | None
         Override default figure height in inches.
     """
-    global _OUTPUT_FORMAT, _FIGURE_WIDTH, _FIGURE_HEIGHT
-    _OUTPUT_FORMAT = output_format
+    global _FIGURE_WIDTH, _FIGURE_HEIGHT
     _FIGURE_WIDTH = figure_width
     _FIGURE_HEIGHT = figure_height
 
