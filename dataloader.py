@@ -9,6 +9,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from data.memmap_dataset import MemmapDataset
+from data.split_manifest import SplitManifest
 
 SPLIT_NAMES = ("train", "val", "test")
 ALL_SPLITS = ("train", "val", "test", "all")
@@ -36,6 +37,8 @@ def create_memmap_data_loader(
     num_workers: int = 0,
     shuffle: bool | None = None,
     seed: int = 42,
+    indices: list[int] | tuple[int, ...] | None = None,
+    split_normalization: tuple[float, float] | None = None,
 ) -> DataLoader:
     if split not in ALL_SPLITS:
         raise ValueError(f"split must be one of {ALL_SPLITS}, got {split}")
@@ -45,6 +48,8 @@ def create_memmap_data_loader(
         split=split,
         envs=envs,
         seed=seed,
+        indices=indices,
+        split_normalization=split_normalization,
     )
     should_shuffle = shuffle if shuffle is not None else split in ("train", "all")
     return DataLoader(
@@ -55,6 +60,25 @@ def create_memmap_data_loader(
         collate_fn=memmap_collate_fn,
         pin_memory=True,
         persistent_workers=num_workers > 0,
+    )
+
+
+def create_manifest_data_loader(
+    data_dir: str | Path,
+    manifest: SplitManifest,
+    key: str,
+    batch_size: int,
+    num_workers: int = 0,
+    shuffle: bool = False,
+) -> DataLoader:
+    return create_memmap_data_loader(
+        data_dir=data_dir,
+        split="all",
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=shuffle,
+        indices=manifest.indices(key).tolist(),
+        split_normalization=manifest.source_train_normalization,
     )
 
 

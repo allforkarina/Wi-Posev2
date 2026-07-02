@@ -78,6 +78,28 @@ def sha256_array(values: np.ndarray) -> str:
     return hashlib.sha256(contiguous.tobytes()).hexdigest()
 
 
+def compute_source_train_normalization(
+    dataset_root: str | Path,
+    train_indices: np.ndarray,
+    chunk_size: int = 4096,
+) -> tuple[float, float]:
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1")
+    indices = np.asarray(train_indices, dtype=np.int64)
+    if len(indices) == 0:
+        raise ValueError("Source training indices cannot be empty")
+    csi = np.load(Path(dataset_root) / "csi_gminmax.npy", mmap_mode="r")
+    lower = float("inf")
+    upper = float("-inf")
+    for start in range(0, len(indices), chunk_size):
+        chunk = np.asarray(csi[indices[start:start + chunk_size]])
+        lower = min(lower, float(chunk.min()))
+        upper = max(upper, float(chunk.max()))
+    if upper - lower <= 1e-12:
+        raise ValueError("Source-train normalization range must be greater than 1e-12")
+    return lower, upper
+
+
 def stable_group_seed(seed: int, group: tuple[str, str, str], purpose: str) -> int:
     payload = "\0".join((str(seed), *group, purpose)).encode("utf-8")
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "little")

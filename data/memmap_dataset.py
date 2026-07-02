@@ -36,11 +36,14 @@ class MemmapDataset(Dataset):
         random_val_ratio: float = 0.2,
         seed: int = 42,
         normalize: str = "global_minmax",
+        indices: Iterable[int] | np.ndarray | None = None,
+        split_normalization: tuple[float, float] | None = None,
     ) -> None:
         if split not in {"train", "val", "test", "all"}:
             raise ValueError(f"split must be train/val/test/all, got {split}")
         self.split = split
         self.normalize = normalize
+        self.split_normalization = split_normalization
 
         data_dir = Path(data_dir)
 
@@ -56,9 +59,20 @@ class MemmapDataset(Dataset):
         self._samples = meta["sample"]
         self._actions = meta["action"]
 
-        self.indices = self._build_split(
-            split, envs, train_subjects, test_subjects, random_val_ratio, seed
-        )
+        if split_normalization is not None:
+            lower, upper = split_normalization
+            if upper - lower <= 1e-12:
+                raise ValueError("split normalization range must be greater than 1e-12")
+
+        if indices is None:
+            self.indices = self._build_split(
+                split, envs, train_subjects, test_subjects, random_val_ratio, seed
+            )
+        else:
+            explicit_indices = np.asarray(list(indices), dtype=np.int64)
+            if np.any(explicit_indices < 0) or np.any(explicit_indices >= len(self._samples)):
+                raise ValueError("Explicit dataset indices contain out-of-range values")
+            self.indices = explicit_indices.copy()
 
     def _build_split(
         self,
@@ -142,6 +156,9 @@ class MemmapDataset(Dataset):
         frame_idx = int(self.indices[index])
 
         csi = np.array(self._csi[frame_idx])
+        if self.split_normalization is not None:
+            lower, upper = self.split_normalization
+            csi = (csi - lower) / (upper - lower)
         kpts18 = self._kpts18[frame_idx].copy()
 
         item: dict = {
