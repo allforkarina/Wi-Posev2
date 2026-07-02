@@ -8,10 +8,11 @@ from .csi_input_calibration import CSI_INPUT_CALIBRATION_TYPES, build_csi_input_
 from .wiflow_axial_encoder import WiFlowAxialEncoder
 from .wiflow_hierarchical_joint_decoder import WiFlowHierarchicalJointDecoder
 from .wiflow_joint_decoder import WiFlowJointDecoder
+from .wiflow_mlp_decoder import WiFlowMLPDecoder
 from .wiflow_spatial_encoder import WiFlowSpatialEncoder
 from .wrist_refiner import WristRefinementHead
 
-DECODER_TYPES = ("joint", "hierarchical")
+DECODER_TYPES = ("mlp", "joint", "hierarchical")
 
 
 class WiFlowModel(nn.Module):
@@ -53,7 +54,9 @@ class WiFlowModel(nn.Module):
             background_kernel_size=background_kernel_size,
         )
         self.axial_encoder = WiFlowAxialEncoder(mode=axial_mode)
-        if decoder_type == "joint":
+        if decoder_type == "mlp":
+            self.decoder = WiFlowMLPDecoder()
+        elif decoder_type == "joint":
             self.decoder = WiFlowJointDecoder()
         elif decoder_type == "hierarchical":
             self.decoder = WiFlowHierarchicalJointDecoder()
