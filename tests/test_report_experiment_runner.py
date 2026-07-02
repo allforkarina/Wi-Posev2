@@ -192,3 +192,18 @@ def test_postprocess_failure_is_recorded_for_continue_on_error(
     assert not succeeded
     assert registry[task.experiment_id]["status"] == "failed"
     assert "evaluation failed" in registry[task.experiment_id]["failure"]
+
+
+def test_source_validation_and_test_summaries_update_registry(tmp_path: Path) -> None:
+    task = build_training_tasks(_config(tmp_path))[0]
+    registry = {task.experiment_id: runner._registry_row(task, status="completed")}
+    summary = {"pck_0_2": "0.75", "mpjpe": "0.18"}
+
+    runner._record_source_summary(registry, task, "env1_val", summary)
+    runner._record_source_summary(registry, task, "env1_test", summary)
+
+    row = registry[task.experiment_id]
+    assert row["val_pck_0_2"] == "0.75"
+    assert row["val_mpjpe"] == "0.18"
+    assert row["test_pck_0_2"] == "0.75"
+    assert row["test_mpjpe"] == "0.18"

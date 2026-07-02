@@ -272,6 +272,18 @@ def _record_summary(
     registry[task.experiment_id][f"{prefix}_mpjpe"] = summary["mpjpe"]
 
 
+def _record_source_summary(
+    registry: dict[str, dict[str, Any]],
+    task: ExperimentTask,
+    manifest_key: str,
+    summary: Mapping[str, str],
+) -> None:
+    if manifest_key == "env1_val":
+        _record_summary(registry, task, summary, "val")
+    elif manifest_key == "env1_test":
+        _record_summary(registry, task, summary, "test")
+
+
 def _run_split(
     config: SuiteConfig,
     split_tasks: list[ExperimentTask],
@@ -295,15 +307,23 @@ def _run_split(
             continue
         postprocess_ok = True
         for key in ("env1_val", "env1_test", "env2_val", "env2_test"):
+            evaluation_dir = task.output_dir / "evaluations" / key
             if not _run_postprocess(
                 task,
-                _evaluation_command(config, task, key, task.output_dir / "evaluations" / key),
+                _evaluation_command(config, task, key, evaluation_dir),
                 f"evaluation:{key}",
                 registry_path,
                 registry,
             ):
                 postprocess_ok = False
                 break
+            _record_source_summary(
+                registry,
+                task,
+                key,
+                _read_summary(evaluation_dir / "benchmark_summary.csv"),
+            )
+            _write_registry(registry_path, registry)
         if postprocess_ok:
             postprocess_ok = _run_postprocess(
                 task,
