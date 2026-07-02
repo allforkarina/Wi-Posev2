@@ -17,6 +17,7 @@ from data.split_manifest import (
     save_manifest,
     validate_manifest,
 )
+from scripts.build_split_manifests import main as build_manifests_main
 
 
 TEST_FEW_SHOT_SPECS = {
@@ -282,3 +283,33 @@ def test_load_manifest_rejects_tampered_array(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="array hash mismatch"):
         load_manifest(path, dataset_root, few_shot_keys=tuple(TEST_FEW_SHOT_SPECS))
+
+
+def test_builder_cli_creates_reloadable_protocol_manifests(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset"
+    output_dir = tmp_path / "manifests"
+    dataset_root.mkdir()
+    metadata = _synthetic_metadata(frames_per_group=64)
+    _write_meta(dataset_root / "meta.npz", metadata)
+    values = np.linspace(0.0, 1.0, len(metadata.environment), dtype=np.float32)
+    csi = np.broadcast_to(values[:, None, None, None], (len(values), 2, 3, 4)).copy()
+    np.save(dataset_root / "csi_gminmax.npy", csi)
+
+    exit_code = build_manifests_main([
+        "--dataset-root", str(dataset_root),
+        "--output-dir", str(output_dir),
+        "--seed", "42",
+        "--block-size", "16",
+    ])
+
+    assert exit_code == 0
+    random_path = output_dir / "random_frame_seed42.npz"
+    temporal_path = output_dir / "temporal_block16_seed42.npz"
+    assert random_path.is_file()
+    assert random_path.with_suffix(".json").is_file()
+    assert temporal_path.is_file()
+    assert temporal_path.with_suffix(".json").is_file()
+    random_manifest = load_manifest(random_path, dataset_root)
+    temporal_manifest = load_manifest(temporal_path, dataset_root)
+    assert random_manifest.mode == "random_frame"
+    assert temporal_manifest.mode == "temporal_block"
