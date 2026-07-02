@@ -11,9 +11,10 @@ from typing import Any, Dict, Mapping, Sequence
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 from data.memmap_dataset import MemmapDataset
+from data.split_manifest import SplitManifest, load_manifest
 from dataloader import create_memmap_data_loader, memmap_collate_fn
 from models import WiFlowModel
 from train import (
@@ -32,6 +33,7 @@ from train import (
 def load_checkpoint_model(
     checkpoint_path: str | Path,
     device: torch.device,
+    expected_manifest_hash: str | None = None,
 ) -> WiFlowModel:
     """Reconstruct a WiFlowModel from a training checkpoint.
 
@@ -45,6 +47,14 @@ def load_checkpoint_model(
     train_config = checkpoint.get("train_config")
     if not isinstance(train_config, Mapping):
         raise KeyError(f"Checkpoint is missing train_config: {checkpoint_path}")
+    checkpoint_manifest_hash = train_config.get("manifest_hash")
+    if (
+        expected_manifest_hash is not None
+        and checkpoint_manifest_hash != expected_manifest_hash
+    ):
+        raise ValueError(
+            "Checkpoint manifest hash does not match the requested evaluation manifest"
+        )
 
     model = WiFlowModel(
         input_channels=3,
@@ -59,6 +69,26 @@ def load_checkpoint_model(
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return model
+
+
+def build_evaluation_dataset(
+    dataset_root: str | Path,
+    manifest: SplitManifest | None = None,
+    manifest_key: str | None = None,
+    eval_envs: tuple[str, ...] | None = None,
+) -> MemmapDataset:
+    if manifest is None:
+        if manifest_key is not None:
+            raise ValueError("manifest_key requires a split manifest")
+        return MemmapDataset(data_dir=dataset_root, split="all", envs=eval_envs)
+    if not manifest_key:
+        raise ValueError("A manifest key is required for manifest-backed evaluation")
+    return MemmapDataset(
+        data_dir=dataset_root,
+        split="all",
+        indices=manifest.indices(manifest_key),
+        split_normalization=manifest.source_train_normalization,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +239,7 @@ def run_evaluation(
             all_targets.append(target.detach().cpu().numpy())
 
     return {
+        "sample_count": sample_count,
         "overall": _average_metrics(totals, sample_count),
         "joint_rows": _build_joint_rows(joint_error_batches, joint_pck_batches),
         "action_rows": _build_group_rows(action_totals, "action"),
@@ -287,6 +318,28 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def write_evaluation_outputs(output_dir: str | Path, result: Mapping[str, Any]) -> None:
+    output_dir = Path(output_dir)
+    diagnostic_overall = result["diagnostic"]["overall"]
+    summary = {
+        "sample_count": int(result["sample_count"]),
+        "mpjpe": float(result["overall"]["mpjpe"]),
+        "bone_error": float(result["overall"]["bone_error"]),
+        "pck_0_1": float(result["overall"]["pck_0_1"]),
+        "pck_0_2": float(result["overall"]["pck_0_2"]),
+        "pck_0_3": float(result["overall"]["pck_0_3"]),
+        "pck_0_4": float(result["overall"]["pck_0_4"]),
+        "pck_0_5": float(result["overall"]["pck_0_5"]),
+        "overall_var_ratio": float(diagnostic_overall["overall_var_ratio"]),
+        "overall_mean_pose_dist": float(diagnostic_overall["overall_mean_pose_dist"]),
+    }
+    _write_csv(output_dir / "benchmark_summary.csv", [summary])
+    _write_csv(output_dir / "per_joint_metrics.csv", result["joint_rows"])
+    _write_csv(output_dir / "per_action_metrics.csv", result["action_rows"])
+    _write_csv(output_dir / "per_environment_metrics.csv", result["environment_rows"])
+    _write_csv(output_dir / "per_joint_diagnostic.csv", result["diagnostic"]["joint_rows"])
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -320,6 +373,16 @@ def parse_args() -> argparse.Namespace:
         help="Path to .npy file containing frame indices to exclude from evaluation.",
     )
     parser.add_argument(
+        "--split-manifest",
+        default=None,
+        help="Path to a deterministic split manifest.",
+    )
+    parser.add_argument(
+        "--manifest-key",
+        default=None,
+        help="Named array in --split-manifest, such as env1_test or env2_test.",
+    )
+    parser.add_argument(
         "--feature-viz", action="store_true", default=False,
         help="Generate research-grade feature visualization figures.",
     )
@@ -348,21 +411,43 @@ def main() -> None:
         print("Error: --feature-viz and --pose-viz are mutually exclusive", file=sys.stderr)
         sys.exit(2)
 
-    device = select_device(args.device)
-    model = load_checkpoint_model(args.checkpoint, device)
-
+    if bool(args.split_manifest) != bool(args.manifest_key):
+        raise ValueError("--split-manifest and --manifest-key must be provided together")
     eval_envs = tuple(args.eval_envs) if args.eval_envs else None
-    test_dataset = MemmapDataset(
-        data_dir=args.dataset_root,
-        split="all",
-        envs=eval_envs,
+    manifest = (
+        load_manifest(args.split_manifest, args.dataset_root)
+        if args.split_manifest
+        else None
+    )
+    device = select_device(args.device)
+    model = load_checkpoint_model(
+        args.checkpoint,
+        device,
+        expected_manifest_hash=manifest.manifest_hash if manifest else None,
+    )
+    test_dataset = build_evaluation_dataset(
+        dataset_root=args.dataset_root,
+        manifest=manifest,
+        manifest_key=args.manifest_key,
+        eval_envs=eval_envs,
     )
 
     if args.exclude_indices:
         exclude = np.load(args.exclude_indices)
         exclude_set = set(exclude.tolist())
-        keep = [i for i in range(len(test_dataset)) if i not in exclude_set]
-        test_dataset = Subset(test_dataset, keep)
+        keep = np.asarray([
+            int(index)
+            for index in test_dataset.indices
+            if int(index) not in exclude_set
+        ], dtype=np.int64)
+        test_dataset = MemmapDataset(
+            data_dir=args.dataset_root,
+            split="all",
+            indices=keep,
+            split_normalization=(
+                manifest.source_train_normalization if manifest else None
+            ),
+        )
         print(f"Excluded {len(exclude_set)} few-shot indices, {len(test_dataset)} remaining")
 
     test_loader = DataLoader(
@@ -383,10 +468,7 @@ def main() -> None:
         print(f"  {name}: {result['overall'][name]:.6f}")
 
     output_dir = Path(args.output_dir)
-    _write_csv(output_dir / "per_joint_metrics.csv", result["joint_rows"])
-    _write_csv(output_dir / "per_action_metrics.csv", result["action_rows"])
-    _write_csv(output_dir / "per_environment_metrics.csv", result["environment_rows"])
-    _write_csv(output_dir / "per_joint_diagnostic.csv", result["diagnostic"]["joint_rows"])
+    write_evaluation_outputs(output_dir, result)
 
     print("\n--- Diagnostic Metrics (mean-pose collapse) ---")
     for name in sorted(result["diagnostic"]["overall"]):
@@ -398,14 +480,9 @@ def main() -> None:
         from evaluation.pose_viz import run_pose_visualization
 
         print("\n--- Pose Joint Scatter Visualization ---")
-        viz_dataset = MemmapDataset(
-            data_dir=args.dataset_root,
-            split="all",
-            envs=eval_envs,
-        )
         run_pose_visualization(
             model=model,
-            dataset=viz_dataset,
+            dataset=test_dataset,
             device=device,
             output_dir=output_dir,
             figure_width=args.figure_width,

@@ -4,7 +4,7 @@ import argparse
 import csv
 import math
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping
 
@@ -18,10 +18,12 @@ from torch.utils.data import DataLoader, Subset
 
 from dataloader import (
     create_few_shot_data_loader,
+    create_manifest_data_loader,
     create_memmap_data_loader,
     create_memmap_data_loaders,
     memmap_collate_fn,
 )
+from data.split_manifest import SplitManifest, load_manifest
 from models import (
     AXIAL_ENCODER_MODES,
     CSI_FEATURE_MODES,
@@ -103,6 +105,33 @@ class TrainConfig:
     few_shot_frames: int = 5
     trainable_groups: tuple[str, ...] = ("encoder",)
     freeze_tier: int | None = None
+    split_manifest: str | None = None
+    few_shot_key: str | None = None
+    split_mode: str | None = None
+    manifest_hash: str | None = None
+
+
+def prepare_training_config(
+    config: TrainConfig,
+) -> tuple[TrainConfig, SplitManifest | None]:
+    if config.decoder_type == "mlp" and config.latent_structure_loss_weight > 0.0:
+        raise ValueError("MLP decoder cannot use latent-structure supervision")
+    if config.decoder_type == "mlp" and config.wrist_refinement:
+        raise ValueError("MLP decoder cannot use wrist refinement because it has no joint latents")
+    if not config.split_manifest:
+        return config, None
+    manifest = load_manifest(config.split_manifest, config.dataset_root)
+    if config.mode == "finetune":
+        if not config.few_shot_key:
+            raise ValueError("Manifest-backed finetuning requires --few-shot-key")
+        manifest.indices(config.few_shot_key)
+    prepared = replace(
+        config,
+        split_manifest=str(manifest.path),
+        split_mode=manifest.mode,
+        manifest_hash=manifest.manifest_hash,
+    )
+    return prepared, manifest
 
 
 def prepare_model_input(
@@ -745,17 +774,31 @@ def apply_finetune_tier(model: nn.Module, tier: int = 1) -> int:
 
 
 def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path) -> None:
-    envs = config.source_envs if config.source_envs else None
-    loaders: dict[str, DataLoader] = {}
-    for split in ("train", "val", "test"):
-        loaders[split] = create_memmap_data_loader(
-            data_dir=config.dataset_root,
-            split=split,
-            batch_size=config.batch_size,
-            envs=envs,
-            num_workers=config.num_workers,
-            seed=config.seed,
-        )
+    if config.split_manifest:
+        manifest = load_manifest(config.split_manifest, config.dataset_root)
+        loaders = {
+            split: create_manifest_data_loader(
+                data_dir=config.dataset_root,
+                manifest=manifest,
+                key=f"env1_{split}",
+                batch_size=config.batch_size,
+                num_workers=config.num_workers,
+                shuffle=split == "train",
+            )
+            for split in ("train", "val", "test")
+        }
+    else:
+        envs = config.source_envs if config.source_envs else None
+        loaders = {}
+        for split in ("train", "val", "test"):
+            loaders[split] = create_memmap_data_loader(
+                data_dir=config.dataset_root,
+                split=split,
+                batch_size=config.batch_size,
+                envs=envs,
+                num_workers=config.num_workers,
+                seed=config.seed,
+            )
 
     train_loader = maybe_subset_loader(loaders["train"], config.subset_size)
     val_loader = maybe_subset_loader(loaders["val"], config.subset_size)
@@ -903,15 +946,38 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
     if "wrist_refiner" in config.trainable_groups and not config.wrist_refinement:
         raise ValueError("--wrist-refinement is required when training wrist_refiner parameters")
 
-    train_loader, val_loader, train_indices = create_few_shot_data_loader(
-        data_dir=config.dataset_root,
-        target_envs=target_envs,
-        few_shot_subjects=config.few_shot_subjects,
-        few_shot_frames=config.few_shot_frames,
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
-        seed=config.seed,
-    )
+    manifest: SplitManifest | None = None
+    if config.split_manifest:
+        manifest = load_manifest(config.split_manifest, config.dataset_root)
+        if not config.few_shot_key:
+            raise ValueError("Manifest-backed finetuning requires --few-shot-key")
+        train_indices = manifest.indices(config.few_shot_key).tolist()
+        train_loader = create_manifest_data_loader(
+            data_dir=config.dataset_root,
+            manifest=manifest,
+            key=config.few_shot_key,
+            batch_size=config.batch_size,
+            num_workers=config.num_workers,
+            shuffle=True,
+        )
+        val_loader = create_manifest_data_loader(
+            data_dir=config.dataset_root,
+            manifest=manifest,
+            key="env2_val",
+            batch_size=config.batch_size,
+            num_workers=config.num_workers,
+            shuffle=False,
+        )
+    else:
+        train_loader, val_loader, train_indices = create_few_shot_data_loader(
+            data_dir=config.dataset_root,
+            target_envs=target_envs,
+            few_shot_subjects=config.few_shot_subjects,
+            few_shot_frames=config.few_shot_frames,
+            batch_size=config.batch_size,
+            num_workers=config.num_workers,
+            seed=config.seed,
+        )
     print(f"Few-shot train: {len(train_indices)} frames, val: {len(val_loader.dataset)} frames")
     if config.distal_replay_factor > 1:
         replay_dataset = build_distal_hard_replay_subset(
@@ -936,15 +1002,25 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
 
     source_loader: DataLoader | None = None
     if config.source_replay_weight > 0.0:
-        source_loader = create_memmap_data_loader(
-            data_dir=config.dataset_root,
-            split="train",
-            batch_size=config.batch_size,
-            envs=config.source_envs,
-            num_workers=config.num_workers,
-            shuffle=True,
-            seed=config.seed,
-        )
+        if manifest is not None:
+            source_loader = create_manifest_data_loader(
+                data_dir=config.dataset_root,
+                manifest=manifest,
+                key="env1_train",
+                batch_size=config.batch_size,
+                num_workers=config.num_workers,
+                shuffle=True,
+            )
+        else:
+            source_loader = create_memmap_data_loader(
+                data_dir=config.dataset_root,
+                split="train",
+                batch_size=config.batch_size,
+                envs=config.source_envs,
+                num_workers=config.num_workers,
+                shuffle=True,
+                seed=config.seed,
+            )
         print(
             "Source replay: "
             f"{len(source_loader.dataset)} source frames, weight={config.source_replay_weight:.3f}"
@@ -957,6 +1033,12 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
     if not config.finetune_from:
         raise ValueError("--finetune-from required for finetune mode")
     checkpoint = torch.load(config.finetune_from, map_location=device)
+    checkpoint_config = checkpoint.get("train_config", {}) if isinstance(checkpoint, Mapping) else {}
+    checkpoint_manifest_hash = checkpoint_config.get("manifest_hash")
+    if config.manifest_hash and checkpoint_manifest_hash != config.manifest_hash:
+        raise ValueError(
+            "Finetune checkpoint manifest hash does not match the requested split manifest"
+        )
     model = WiFlowModel(
         input_channels=3,
         axial_mode=config.axial_mode,
@@ -996,18 +1078,22 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
     model_input, target = prepare_model_input(first_batch, device)
     with torch.no_grad():
         output = model(model_input)
+    keypoint_output = extract_prediction_keypoints(output)
     print(
         "Sanity shapes: "
-        f"input={tuple(model_input.shape)}, output={tuple(output.shape)}, label={tuple(target.shape)}"
+        f"input={tuple(model_input.shape)}, output={tuple(keypoint_output.shape)}, label={tuple(target.shape)}"
     )
 
     best_train_loss = float("inf")
+    best_val_mpjpe = float("inf")
+    best_val_pck_0_2 = -float("inf")
     log_path = output_dir / "train_log.csv"
     for epoch in range(1, config.epochs + 1):
         start_time = time.perf_counter()
         train_metrics = run_finetune_epoch(
             model, train_loader, config, device, optimizer, scheduler, source_loader=source_loader
         )
+        val_metrics = run_epoch(model, val_loader, config, device)
         current_lr = optimizer.param_groups[0]["lr"]
         epoch_time = time.perf_counter() - start_time
 
@@ -1028,6 +1114,13 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
             "train_loss": train_metrics["loss"],
             "train_coord_loss": train_metrics["coord_loss"],
             "train_bone_loss": train_metrics["bone_loss"],
+            "train_mpjpe": train_metrics["mpjpe"],
+            "train_pck_0_2": train_metrics["pck_0_2"],
+            "val_loss": val_metrics["loss"],
+            "val_coord_loss": val_metrics["coord_loss"],
+            "val_bone_loss": val_metrics["bone_loss"],
+            "val_mpjpe": val_metrics["mpjpe"],
+            "val_pck_0_2": val_metrics["pck_0_2"],
             "current_lr": current_lr,
             "epoch_time": epoch_time,
         }
@@ -1044,12 +1137,18 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         if "source_loss" in train_metrics:
             row["train_source_loss"] = train_metrics["source_loss"]
         append_csv_row(log_path, row)
-        append_epoch_metric_csvs(output_dir, epoch, train_metrics)
+        append_epoch_metric_csvs(output_dir, epoch, train_metrics, val_metrics)
 
         save_checkpoint(
             output_dir / f"epoch_{epoch:03d}.pth",
             model, optimizer, scheduler, epoch,
             best_metric=train_metrics["loss"],
+            config=config,
+        )
+        save_checkpoint(
+            output_dir / "last.pth",
+            model, optimizer, scheduler, epoch,
+            best_metric=val_metrics["mpjpe"],
             config=config,
         )
         if train_metrics["loss"] < best_train_loss:
@@ -1060,16 +1159,35 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
                 best_metric=best_train_loss,
                 config=config,
             )
+        if val_metrics["mpjpe"] < best_val_mpjpe:
+            best_val_mpjpe = val_metrics["mpjpe"]
+            save_checkpoint(
+                output_dir / "best_val_mpjpe.pth",
+                model, optimizer, scheduler, epoch,
+                best_metric=best_val_mpjpe,
+                config=config,
+            )
+        if val_metrics["pck_0_2"] > best_val_pck_0_2:
+            best_val_pck_0_2 = val_metrics["pck_0_2"]
+            save_checkpoint(
+                output_dir / "best_val_pck_0_2.pth",
+                model, optimizer, scheduler, epoch,
+                best_metric=best_val_pck_0_2,
+                config=config,
+            )
 
         print(
             f"epoch={epoch:03d} "
             f"train_loss={train_metrics['loss']:.6f} "
+            f"val_mpjpe={val_metrics['mpjpe']:.6f} "
+            f"val_pck_0_2={val_metrics['pck_0_2']:.6f} "
             f"lr={current_lr:.2e} "
             f"epoch_time={epoch_time:.1f}s"
         )
 
 
 def run_training(config: TrainConfig) -> None:
+    config, _ = prepare_training_config(config)
     torch.manual_seed(config.seed)
     device = select_device(config.device)
     output_dir = Path(config.output_dir)
@@ -1127,6 +1245,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--max-lr", type=float, default=5e-4)
+    parser.add_argument("--weight-decay", type=float, default=5e-4)
+    parser.add_argument("--grad-clip-norm", type=float, default=1.0)
+    parser.add_argument("--bone-loss-weight", type=float, default=0.5)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--subset-size", type=int, default=None)
     parser.add_argument(
         "--latent-structure-loss-weight",
         type=float,
@@ -1197,6 +1323,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-envs", nargs="*", default=None, help="Source environment names")
     parser.add_argument("--target-envs", nargs="*", default=None, help="Target environment names")
     parser.add_argument("--finetune-from", default=None, help="Path to source checkpoint for finetune")
+    parser.add_argument(
+        "--split-manifest",
+        default=None,
+        help="Path to a deterministic split manifest. Legacy splitting is used when omitted.",
+    )
+    parser.add_argument(
+        "--few-shot-key",
+        default=None,
+        help="Named env2 few-shot array in --split-manifest for finetuning.",
+    )
     parser.add_argument("--few-shot-subjects", type=int, default=4)
     parser.add_argument("--few-shot-frames", type=int, default=5)
     parser.add_argument(

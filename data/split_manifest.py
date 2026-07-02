@@ -328,7 +328,7 @@ def save_manifest(
 def load_manifest(
     path: str | Path,
     dataset_root: str | Path,
-    few_shot_keys: tuple[str, ...] = tuple(DEFAULT_FEW_SHOT_SPECS),
+    few_shot_keys: tuple[str, ...] | None = None,
 ) -> SplitManifest:
     path = Path(path)
     dataset_root = Path(dataset_root)
@@ -341,6 +341,8 @@ def load_manifest(
             key: np.asarray(archive[key], dtype=np.int64)
             for key in archive.files
         }
+    if few_shot_keys is None:
+        few_shot_keys = tuple(key for key in arrays if key.startswith("env2_fewshot_"))
     for key, expected_hash in sidecar["array_sha256"].items():
         if key not in arrays or sha256_array(arrays[key]) != expected_hash:
             raise ValueError(f"Manifest array hash mismatch for key: {key}")
