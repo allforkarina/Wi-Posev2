@@ -1,22 +1,28 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `dataloader.py`: Core module for loading NPY memmap datasets, creating PyTorch `DataLoader` instances with `memmap_collate_fn`, and providing `create_memmap_data_loader` / `create_memmap_data_loaders` / `create_few_shot_data_loader` factory functions.
-- `data/memmap_dataset.py`: NPY memmap dataset reader that loads CSI amplitude, OpenPose18 keypoints, and metadata from `.npy`/`.npz` files with zero-copy OS-cached I/O.
+- `dataloader.py`: Core module for loading NPY memmap datasets, creating PyTorch `DataLoader` instances with `memmap_collate_fn`, and providing legacy and manifest-backed loader factories.
+- `data/memmap_dataset.py`: NPY memmap dataset reader that loads CSI amplitude, OpenPose18 keypoints, and metadata from `.npy`/`.npz` files with zero-copy OS-cached I/O. It accepts explicit absolute row indices and optional source-train affine normalization for reproducible experiments.
+- `data/split_manifest.py`: Deterministic random-frame and distributed temporal-block split construction, balanced nested env2 few-shot selection, dataset/array hashing, validation, and source-train normalization statistics.
 - `data/heatmap_gt.py`: OpenPose18 coordinate conversion utilities (coco17_to_openpose18, valid_point).
 - `pose_targets.py`: Reserved for future pose target utilities.
-- `models/`: PyTorch model code, including the full WiFlow model, optional CSI input calibration, CSI physics feature-bank input transform, CSI spatial encoder with baseline or background-gated stem, symmetric spatio-temporal downsampling, axial attention encoder, multi-layer joint cross-attention decoder, hierarchical joint decoder ablation, optional custom wrist refinement head, and shared OpenPose18 skeleton topology. The active single-frame model path is raw CSI amplitude -> optional input calibration -> optional CSI feature bank -> spatial encoder stem -> symmetric time-frequency residual blocks -> axial encoder -> the configured decoder -> optional wrist refinement.
-- `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and per-epoch CSV logging. In addition to the compatibility `train_log.csv`, each run appends completed epochs to `loss.csv`, `mpjpe.csv`, `bone_error.csv`, and threshold-specific `pck_0_1.csv` through `pck_0_5.csv`. Supports `--mode source_only` (single-domain training), `--mode finetune` (cross-domain few-shot finetuning with explicit `--trainable-groups` ablations such as encoder-only, decoder-only, and full finetuning), `--input-calibration none|antenna_subcarrier_affine|antenna_subcarrier_dynamic`, `--csi-feature-mode raw|physics_bank`, `--spatial-stem baseline|background_gated`, optional decoder joint-latent structure supervision via `--latent-structure-loss-weight`, optional target-domain encoder pose-relation supervision via `--encoder-relation-loss-weight`, optional distal-joint target replay/source replay via `--distal-loss-weight`, `--distal-replay-factor`, and `--source-replay-weight`, optional custom wrist-chain direction supervision via `--wrist-direction-loss-weight`, and optional custom wrist local coordinate refinement via `--wrist-refinement`.
-- `eval.py`: Root-level evaluation entrypoint for loading checkpoints, computing test metrics, and optionally generating PNG-only research-grade feature visualizations via `--feature-viz`. Supports `--eval-envs` (environment filtering) and `--exclude-indices` (exclude few-shot training frames).
+- `models/`: PyTorch model code, including the full WiFlow model, optional CSI input calibration, CSI physics feature-bank input transform, CSI spatial encoder, axial attention encoder, conventional global-pooling MLP decoder, multi-layer joint cross-attention decoder, hierarchical joint decoder ablation, optional custom wrist refinement head, and shared OpenPose18 skeleton topology. The supported decoder controls are `mlp`, `joint`, and `hierarchical`.
+- `train.py`: Root-level training entrypoint for WiFlow pose regression, including losses, metrics, optimizer, scheduler, checkpointing, and per-epoch CSV logging. In addition to the compatibility `train_log.csv`, each run appends completed epochs to `loss.csv`, `mpjpe.csv`, `bone_error.csv`, and threshold-specific `pck_0_1.csv` through `pck_0_5.csv`. `--split-manifest` selects deterministic env1/env2 splits and `--few-shot-key` selects a nested target subset. Manifest provenance is stored in checkpoints. Finetuning evaluates env2 validation every epoch and writes `best_val_mpjpe.pth`, `best_val_pck_0_2.pth`, `best_train_loss.pth`, and `last.pth`.
+- `eval.py`: Root-level evaluation entrypoint for loading checkpoints, computing metrics, writing `benchmark_summary.csv` plus detailed per-joint/action/environment/diagnostic CSVs, and optionally generating PNG-only visualizations. `--split-manifest` and `--manifest-key` select an exact split and reject checkpoint/manifest hash mismatches.
 - `evaluation/`: Evaluation pipeline package.
   - `evaluation/hooks.py`: Forward hook context manager (`WiFlowHookContext`, `wiflow_hooks`) for non-invasive intermediate feature extraction from WiFlow submodules.
   - `evaluation/feature_viz.py`: Orchestrator and figure-drawing functions for research-grade feature visualization (antenna channel response, resblock PCA trajectory, axial attention maps, joint query t-SNE, feature-pose correlation).
   - `evaluation/pose_viz.py`: Per-action joint scatter + skeleton visualization with custom bone edges, two-subplot individual figures, and N×M grid per-action composites.
+  - `evaluation/benchmark.py`: Parameter counts, documented Conv2d/Linear/MultiheadAttention MAC/FLOP estimates, strict device validation, and batch-1 latency measurement.
+- `experiments/report_suite.py`: Pure definitions for the 30-run single-seed Section 2.4/2.5 matrix, validation-only trainable-group selection, and resume validation.
 - `scripts/`: Preprocessing and diagnostic utilities.
   - `scripts/build_memmap.py`: Command-line wrapper that builds an NPY memmap dataset from the raw MM-Fi directory structure.
   - `scripts/build_groundtruth.py`: Builds ground-truth keypoint statistics and visualizations.
   - `scripts/visualize_gt.py`: Visualizes ground-truth pose annotations overlaid on corresponding video frames.
   - `scripts/stem_feature_diagnostic.py`: Loads a checkpoint and summarizes spatial-stem background/residual/gate diagnostics, including environment mean gaps and pose-distance correlations.
+  - `scripts/build_split_manifests.py`: Builds the random-frame and block-16 temporal manifests with nested 540/810/4050/8100 env2 few-shot arrays.
+  - `scripts/benchmark_wipose.py`: Benchmarks one Wi-Pose checkpoint on one manifest key and writes accuracy/diagnostic/runtime CSVs.
+  - `scripts/run_report_experiments.py`: Runs or dry-runs the ordered 30-training-run final-report suite with registry and validated resume support.
 - `tests/`: `pytest` unit tests. Mirror module names such as `tests/test_dataloader.py`, `tests/test_wiflow_model.py`, or `tests/test_wiflow_decoder.py`.
 - `.gitignore`: Excludes Python caches, local environments, generated datasets, checkpoints, and editor files from Git.
 
@@ -30,6 +36,8 @@ Generated datasets can be large and should not be committed. Keep raw dataset ro
 - The central modeling gap is that CSI is a low-resolution, high-noise, implicit sensing signal, while pose regression needs precise coordinates. Strong skeleton priors are important for bridging that gap.
 - Preserve CSI physical dimension semantics where practical. Avoid arbitrary flattening or pooling that mixes antenna, subcarrier, and temporal meanings before the model has selected useful information.
 - Prefer attention-based information selection over destructive pooling for low-SNR CSI features, and use structured supervision such as bone or topology-aware losses in addition to coordinate losses.
+- The conventional `mlp` decoder is a matched control, not the proposed structured design: it globally averages `[B, 256, 29, 16]` and uses a 2,005,540-parameter fully connected regressor. Compare it against `joint` and `hierarchical` under the same manifest, seed, losses, optimizer, and schedule.
+- Final-report manifests stratify by `(environment, subject, action)`. Random-frame uses per-group 8:1:1 allocation; temporal-block keeps consecutive 16-frame blocks intact and distributes shuffled blocks across 8:1:1 splits. All env2 few-shot sets come only from env2 train and are nested.
 - `--input-calibration antenna_subcarrier_affine` adds a 684-parameter identity-initialized affine layer before any CSI feature-bank expansion: `x'[antenna, subcarrier, time] = exp(log_scale[antenna, subcarrier]) * x + bias[antenna, subcarrier]`. This tests whether cross-domain failure is caused by target-room antenna/subcarrier transfer-function mismatch rather than by decoder pose priors. It preserves temporal structure and should be tested with `--trainable-groups input_calibration` first, then with decoder or encoder combinations.
 - `--input-calibration antenna_subcarrier_dynamic` adds an identity-initialized sample-adaptive calibration layer. It builds per-sample controller features from antenna/subcarrier temporal mean and standard deviation, predicts weights over learnable antenna-subcarrier scale/bias bases, and then applies the resulting calibration uniformly over the time axis. This tests whether the target-room mismatch is pose-conditioned multipath remapping rather than one static affine transfer function. The layer preserves CSI temporal order and should be compared against the static affine variant under matched few-shot indices.
 - `--csi-feature-mode physics_bank` expands the raw 3-channel amplitude tensor to 12 channels by concatenating raw amplitude, temporal residuals, antenna differential responses, and subcarrier gradients. This tests whether cross-domain failure is caused by weak human-induced CSI perturbations being buried under environment-specific static multipath. The raw view remains present, so the ablation adds physically motivated evidence rather than deleting amplitude-scale information.
@@ -58,6 +66,32 @@ Run tests:
 
 ```powershell
 pytest
+```
+
+Build both final-report split manifests:
+
+```powershell
+python scripts\build_split_manifests.py --dataset-root data\mmfi_pose --output-dir outputs\final_report_seed42\manifests --seed 42 --block-size 16
+```
+
+Audit the exact 30 training commands without launching training:
+
+```powershell
+python scripts\run_report_experiments.py --dataset-root data\mmfi_pose --output-root outputs\final_report_seed42 --split-modes random_frame temporal_block --seed 42 --source-epochs 50 --finetune-epochs 30 --batch-size 64 --device cuda --dry-run
+```
+
+Run or resume the complete random-frame-first experiment suite:
+
+```powershell
+python scripts\run_report_experiments.py --dataset-root data\mmfi_pose --output-root outputs\final_report_seed42 --split-modes random_frame temporal_block --seed 42 --source-epochs 50 --finetune-epochs 30 --batch-size 64 --device cuda --resume
+```
+
+Run one direct manifest-backed source experiment and evaluation:
+
+```powershell
+python train.py --mode source_only --dataset-root data\mmfi_pose --split-manifest outputs\final_report_seed42\manifests\random_frame_seed42.npz --source-envs env1 --decoder-type joint --bone-loss-weight 0.5 --seed 42 --epochs 50 --batch-size 64 --device cuda --output-dir outputs\final_report_seed42\random_frame\source\a1
+python eval.py --dataset-root data\mmfi_pose --checkpoint outputs\final_report_seed42\random_frame\source\a1\best_val_pck_0_2.pth --split-manifest outputs\final_report_seed42\manifests\random_frame_seed42.npz --manifest-key env2_test --device cuda --output-dir outputs\final_report_seed42\random_frame\source\a1\evaluations\env2_test
+python scripts\benchmark_wipose.py --dataset-root data\mmfi_pose --checkpoint outputs\final_report_seed42\random_frame\source\a1\best_val_pck_0_2.pth --split-manifest outputs\final_report_seed42\manifests\random_frame_seed42.npz --manifest-key env1_test --device cuda --output-dir outputs\final_report_seed42\random_frame\source\a1\benchmark\env1_test
 ```
 
 Run a quick training sanity check:
@@ -128,7 +162,7 @@ Run a hierarchical decoder ablation:
 python train.py --mode source_only --dataset-root data\mmfi_pose --decoder-type hierarchical --epochs 50 --batch-size 64 --output-dir outputs\train_hierarchical_decoder
 ```
 
-Supported `--axial-mode` values are `spatial_then_temporal`, `temporal_then_spatial`, `parallel_sum`, and `parallel_concat`. Supported `--decoder-type` values are `joint` and `hierarchical`. Checkpoints store the selected mode, decoder type, and settings in `train_config`, and evaluation rebuilds the model from that saved configuration.
+Supported `--axial-mode` values are `spatial_then_temporal`, `temporal_then_spatial`, `parallel_sum`, and `parallel_concat`. Supported `--decoder-type` values are `mlp`, `joint`, and `hierarchical`. Checkpoints store the selected mode, decoder type, manifest provenance, and settings in `train_config`, and evaluation rebuilds the model from that saved configuration.
 
 Evaluate one checkpoint:
 
@@ -182,7 +216,7 @@ python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2
 python train.py --mode finetune --dataset-root data\mmfi_pose --target-envs env2 --output-dir outputs\finetune_background_gated --finetune-from outputs\source_background_gated\best_val_mpjpe.pth --spatial-stem background_gated --background-kernel-size 9 --trainable-groups decoder --few-shot-subjects 4 --few-shot-frames 5 --epochs 30
 
 # Phase 4: Post-FT Evaluation
-python eval.py --dataset-root data\mmfi_pose --checkpoint outputs\finetune\best_train_loss.pth --eval-envs env2 --output-dir outputs\finetune_eval --exclude-indices outputs\finetune\few_shot_train_indices.npy
+python eval.py --dataset-root data\mmfi_pose --checkpoint outputs\finetune\best_val_pck_0_2.pth --eval-envs env2 --output-dir outputs\finetune_eval --exclude-indices outputs\finetune\few_shot_train_indices.npy
 ```
 
 Run trainable-group finetune ablations with independent parameter sets rather than cumulative tier unlocking:
