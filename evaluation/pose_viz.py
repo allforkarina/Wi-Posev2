@@ -205,17 +205,21 @@ def _draw_skeleton(
 # Figure-level
 # ---------------------------------------------------------------------------
 
-def _save_individual(
+def save_pose_comparison(
     target: np.ndarray,
     prediction: np.ndarray,
     action: str,
     subject: str,
     environment: str,
     output_dir: Path,
-    figure_width: float | None,
-    figure_height: float | None,
-) -> None:
+    figure_width: float | None = None,
+    figure_height: float | None = None,
+    dataset_index: int | None = None,
+    model_label: str | None = None,
+) -> Path:
     """Save a two-subplot figure: scatter (left) + skeleton (right)."""
+    if target.shape != (18, 2) or prediction.shape != (18, 2):
+        raise ValueError("target and prediction must both have shape [18, 2]")
     fig_w = figure_width or 14.0
     fig_h = figure_height or 6.5
     fig, (ax_scatter, ax_skeleton) = plt.subplots(1, 2, figsize=(fig_w, fig_h))
@@ -257,10 +261,13 @@ def _save_individual(
     ]
     ax_skeleton.legend(handles=legend_elements, loc="upper right", fontsize=9)
 
-    fig.suptitle(
-        f"{action} / {subject} / {environment}",
-        fontsize=13, fontweight="bold",
-    )
+    index_label = f"idx{dataset_index}" if dataset_index is not None else None
+    title_parts = [
+        part
+        for part in (model_label, action, subject, environment, index_label)
+        if part
+    ]
+    fig.suptitle(" / ".join(title_parts), fontsize=13, fontweight="bold")
     fig.subplots_adjust(left=0.08, right=0.95, top=0.90, bottom=0.10, wspace=0.25)
 
     # save
@@ -268,8 +275,11 @@ def _save_individual(
     action_dir.mkdir(parents=True, exist_ok=True)
     safe_subject = subject.replace("/", "_").replace("\\", "_")
     safe_env = environment.replace("/", "_").replace("\\", "_")
-    fig.savefig(str(action_dir / f"{safe_subject}_{safe_env}.png"), dpi=300)
+    index_suffix = f"_idx{dataset_index}" if dataset_index is not None else ""
+    output_path = action_dir / f"{safe_subject}_{safe_env}{index_suffix}.png"
+    fig.savefig(str(output_path), dpi=300)
     plt.close(fig)
+    return output_path
 
 
 def _build_action_composite(
@@ -414,7 +424,7 @@ def run_pose_visualization(
                 subject = str(batch["sample"][i])
                 environment = str(batch["environment"][i])
 
-                _save_individual(
+                save_pose_comparison(
                     target=targets_np[i],
                     prediction=preds[i],
                     action=action,
