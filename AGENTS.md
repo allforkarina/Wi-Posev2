@@ -23,6 +23,7 @@
   - `scripts/build_split_manifests.py`: Builds the random-frame and block-16 temporal manifests with nested 540/810/4050/8100 env2 few-shot arrays.
   - `scripts/benchmark_wipose.py`: Benchmarks one Wi-Pose checkpoint on one manifest key and writes accuracy/diagnostic/runtime CSVs.
   - `scripts/run_report_experiments.py`: Runs or dry-runs the ordered 30-training-run final-report suite with registry and validated resume support.
+  - `scripts/export_report_pose_visualizations.py`: Exports deterministic random-frame final-report pose PNGs for Source A1 and the 540/810/4050/8100-frame full-finetune checkpoints. It selects one seeded random test frame per action, reuses identical env2 indices across all finetuning scales, and records the selected absolute indices in CSV files.
 - `tests/`: `pytest` unit tests. Mirror module names such as `tests/test_dataloader.py`, `tests/test_wiflow_model.py`, or `tests/test_wiflow_decoder.py`.
 - `.gitignore`: Excludes Python caches, local environments, generated datasets, checkpoints, and editor files from Git.
 
@@ -169,6 +170,14 @@ Evaluate one checkpoint:
 ```powershell
 python eval.py --dataset-root data\mmfi_pose --checkpoint outputs\train\best_val_mpjpe.pth --output-dir outputs\eval
 ```
+
+Export the random-frame final-report GT-versus-prediction pose PNGs after the report suite has completed:
+
+```bash
+python scripts/export_report_pose_visualizations.py --dataset-root /data/WiFiPose/dataset/mmfi_pose_v4 --experiment-root outputs/final_report_seed42_v4 --output-dir outputs/final_report_seed42_v4/pose_visualizations/random_frame --seed 42 --batch-size 64 --num-workers 4 --device cuda
+```
+
+The five `best_val_pck_0_2.pth` files must remain in their original Source A1, F5, V2, V3, and V4 experiment directories. The exporter writes PNG files only and refuses to overwrite a non-empty output directory.
 
 Diagnose one background-gated checkpoint:
 
