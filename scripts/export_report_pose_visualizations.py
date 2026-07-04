@@ -1,17 +1,30 @@
 from __future__ import annotations
 
+import argparse
+import csv
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
+import torch
+from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.memmap_dataset import MemmapDataset  # noqa: E402
+from data.split_manifest import SplitManifest, load_manifest  # noqa: E402
+from dataloader import memmap_collate_fn  # noqa: E402
+from eval import load_checkpoint_model  # noqa: E402
+from evaluation.pose_viz import save_pose_comparison  # noqa: E402
+from train import (  # noqa: E402
+    extract_prediction_keypoints,
+    prepare_model_input,
+    select_device,
+)
 
 
 @dataclass(frozen=True)
@@ -96,6 +109,89 @@ def records_for_job(
     raise ValueError(f"Unsupported report manifest key: {job.manifest_key}")
 
 
+def prepare_output_dir(output_dir: Path) -> None:
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(f"Output directory is non-empty: {output_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+
+def write_sample_records(path: Path, records: Sequence[SampleRecord]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=("action", "dataset_index", "subject", "environment"),
+        )
+        writer.writeheader()
+        for record in records:
+            writer.writerow({
+                "action": record.action,
+                "dataset_index": record.dataset_index,
+                "subject": record.subject,
+                "environment": record.environment,
+            })
+
+
+def build_selected_dataset(
+    dataset_root: Path,
+    manifest: SplitManifest,
+    records: Sequence[SampleRecord],
+) -> MemmapDataset:
+    return MemmapDataset(
+        data_dir=dataset_root,
+        split="all",
+        indices=[record.dataset_index for record in records],
+        split_normalization=manifest.source_train_normalization,
+    )
+
+
+def export_job(
+    job: ResolvedReportJob,
+    records: Sequence[SampleRecord],
+    dataset_root: Path,
+    manifest: SplitManifest,
+    output_dir: Path,
+    device: torch.device,
+    batch_size: int,
+    num_workers: int,
+) -> None:
+    model = load_checkpoint_model(
+        job.checkpoint_path,
+        device,
+        expected_manifest_hash=manifest.manifest_hash,
+    )
+    dataset = build_selected_dataset(dataset_root, manifest, records)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=memmap_collate_fn,
+        pin_memory=device.type == "cuda",
+        persistent_workers=num_workers > 0,
+    )
+    rendered = 0
+    with torch.no_grad():
+        for batch in loader:
+            model_input, target = prepare_model_input(batch, device)
+            predictions = extract_prediction_keypoints(model(model_input)).cpu().numpy()
+            targets = target.cpu().numpy()
+            for offset in range(len(predictions)):
+                save_pose_comparison(
+                    target=targets[offset],
+                    prediction=predictions[offset],
+                    action=str(batch["action"][offset]),
+                    subject=str(batch["sample"][offset]),
+                    environment=str(batch["environment"][offset]),
+                    output_dir=output_dir / job.output_name,
+                    dataset_index=int(batch["frame_idx"][offset]),
+                    model_label=job.model_label,
+                )
+                rendered += 1
+    if rendered != len(records):
+        raise RuntimeError(f"Rendered {rendered} samples, expected {len(records)}")
+
+
 def select_one_sample_per_action(
     dataset: MemmapDataset,
     seed: int,
@@ -120,3 +216,83 @@ def select_one_sample_per_action(
             environment=str(dataset._envs[dataset_index]),
         ))
     return tuple(selected)
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Export final-report GT-versus-prediction pose PNGs.",
+    )
+    parser.add_argument("--dataset-root", required=True, type=Path)
+    parser.add_argument("--experiment-root", required=True, type=Path)
+    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--device", default="cuda")
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    dataset_root = args.dataset_root.resolve()
+    experiment_root = args.experiment_root.resolve()
+    output_dir = args.output_dir.resolve()
+    manifest_path = (
+        experiment_root / "manifests" / f"random_frame_seed{args.seed}.npz"
+    )
+    if not dataset_root.is_dir():
+        raise FileNotFoundError(f"Dataset root not found: {dataset_root}")
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Random-frame manifest not found: {manifest_path}")
+
+    jobs = resolve_report_jobs(experiment_root)
+    missing = [job.checkpoint_path for job in jobs if not job.checkpoint_path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"Required checkpoint not found: {missing[0]}")
+
+    manifest = load_manifest(manifest_path, dataset_root)
+    source_candidates = MemmapDataset(
+        dataset_root,
+        split="all",
+        indices=manifest.indices("env1_test"),
+        split_normalization=manifest.source_train_normalization,
+    )
+    target_candidates = MemmapDataset(
+        dataset_root,
+        split="all",
+        indices=manifest.indices("env2_test"),
+        split_normalization=manifest.source_train_normalization,
+    )
+    source_records = select_one_sample_per_action(source_candidates, args.seed)
+    target_records = select_one_sample_per_action(target_candidates, args.seed)
+
+    prepare_output_dir(output_dir)
+    sample_dir = output_dir / "sample_indices"
+    write_sample_records(
+        sample_dir / f"env1_test_seed{args.seed}.csv",
+        source_records,
+    )
+    write_sample_records(
+        sample_dir / f"env2_test_seed{args.seed}.csv",
+        target_records,
+    )
+
+    device = select_device(args.device)
+    for job in jobs:
+        records = records_for_job(job, source_records, target_records)
+        print(f"Exporting {job.output_name}: {len(records)} actions", flush=True)
+        export_job(
+            job=job,
+            records=records,
+            dataset_root=dataset_root,
+            manifest=manifest,
+            output_dir=output_dir,
+            device=device,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
