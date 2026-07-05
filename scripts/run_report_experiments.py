@@ -41,6 +41,8 @@ REGISTRY_FIELDS = (
     "val_mpjpe",
     "test_pck_0_2",
     "test_mpjpe",
+    "val_pck_0_05",
+    "test_pck_0_05",
     "failure",
 )
 
@@ -88,6 +90,8 @@ def _registry_row(task: ExperimentTask, status: str = "planned") -> dict[str, An
         "val_mpjpe": "",
         "test_pck_0_2": "",
         "test_mpjpe": "",
+        "val_pck_0_05": "",
+        "test_pck_0_05": "",
         "failure": "",
     }
 
@@ -270,6 +274,7 @@ def _record_summary(
 ) -> None:
     registry[task.experiment_id][f"{prefix}_pck_0_2"] = summary["pck_0_2"]
     registry[task.experiment_id][f"{prefix}_mpjpe"] = summary["mpjpe"]
+    registry[task.experiment_id][f"{prefix}_pck_0_05"] = summary.get("pck_0_05", "")
 
 
 def _record_source_summary(

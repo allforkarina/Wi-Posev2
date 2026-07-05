@@ -325,6 +325,7 @@ def write_evaluation_outputs(output_dir: str | Path, result: Mapping[str, Any]) 
         "sample_count": int(result["sample_count"]),
         "mpjpe": float(result["overall"]["mpjpe"]),
         "bone_error": float(result["overall"]["bone_error"]),
+        "pck_0_05": float(result["overall"]["pck_0_05"]),
         "pck_0_1": float(result["overall"]["pck_0_1"]),
         "pck_0_2": float(result["overall"]["pck_0_2"]),
         "pck_0_3": float(result["overall"]["pck_0_3"]),

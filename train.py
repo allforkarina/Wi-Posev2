@@ -35,7 +35,7 @@ from models import (
 )
 
 
-PCK_THRESHOLDS: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5)
+PCK_THRESHOLDS: tuple[float, ...] = (0.05, 0.1, 0.2, 0.3, 0.4, 0.5)
 RIGHT_SHOULDER_INDEX = 2
 LEFT_HIP_INDEX = 11
 DISTAL_SUPERVISION_JOINTS: tuple[int, ...] = (4, 7, 9, 10, 12, 13)
@@ -370,7 +370,7 @@ def compute_metrics(prediction: torch.Tensor, target: torch.Tensor) -> Dict[str,
         "bone_error": bone_length_loss(prediction, target),
     }
     for threshold in PCK_THRESHOLDS:
-        metrics[f"pck_{threshold:.1f}".replace(".", "_")] = pck(prediction, target, threshold)
+        metrics[f"pck_{threshold:.2f}".replace(".", "_").rstrip("_0")] = pck(prediction, target, threshold)
     return metrics
 
 
