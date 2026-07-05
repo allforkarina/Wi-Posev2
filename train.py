@@ -598,7 +598,7 @@ def append_epoch_metric_csvs(
     append_csv_row(output_dir / "mpjpe.csv", build_row(("mpjpe",)))
     append_csv_row(output_dir / "bone_error.csv", build_row(("bone_error",)))
     for threshold in PCK_THRESHOLDS:
-        metric_name = f"pck_{threshold:.1f}".replace(".", "_")
+        metric_name = f"pck_{threshold:.2f}".replace(".", "_").rstrip("_0")
         append_csv_row(output_dir / f"{metric_name}.csv", build_row((metric_name,)))
 
 

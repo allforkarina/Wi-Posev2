@@ -35,6 +35,7 @@ def test_append_epoch_metric_csvs_separates_metric_families(tmp_path: Path) -> N
         "source_loss": 0.1,
         "mpjpe": 0.3,
         "bone_error": 0.2,
+        "pck_0_05": 0.05,
         "pck_0_1": 0.1,
         "pck_0_2": 0.2,
         "pck_0_3": 0.3,
@@ -47,6 +48,7 @@ def test_append_epoch_metric_csvs_separates_metric_families(tmp_path: Path) -> N
         "bone_loss": 0.15,
         "mpjpe": 0.25,
         "bone_error": 0.15,
+        "pck_0_05": 0.075,
         "pck_0_1": 0.15,
         "pck_0_2": 0.25,
         "pck_0_3": 0.35,
@@ -61,6 +63,7 @@ def test_append_epoch_metric_csvs_separates_metric_families(tmp_path: Path) -> N
         "loss.csv",
         "mpjpe.csv",
         "bone_error.csv",
+        "pck_0_05.csv",
         "pck_0_1.csv",
         "pck_0_2.csv",
         "pck_0_3.csv",
@@ -78,7 +81,7 @@ def test_append_epoch_metric_csvs_separates_metric_families(tmp_path: Path) -> N
     assert set(mpjpe_rows[0]) == {"epoch", "train_mpjpe", "val_mpjpe"}
     assert "train_source_loss" not in mpjpe_rows[0]
 
-    for threshold in range(1, 6):
+    for threshold in ("05", "1", "2", "3", "4", "5"):
         metric_name = f"pck_0_{threshold}"
         rows = _read_rows(tmp_path / f"{metric_name}.csv")
         assert len(rows) == 2
@@ -93,6 +96,7 @@ def test_append_epoch_metric_csvs_supports_finetune_without_validation(tmp_path:
         "target_loss": 0.9,
         "mpjpe": 0.3,
         "bone_error": 0.2,
+        "pck_0_05": 0.05,
         "pck_0_1": 0.1,
         "pck_0_2": 0.2,
         "pck_0_3": 0.3,
