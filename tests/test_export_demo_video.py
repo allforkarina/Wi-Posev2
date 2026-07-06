@@ -292,6 +292,73 @@ class TestParseArgs:
         with pytest.raises(SystemExit):
             parse_args()
 
+    @pytest.mark.parametrize("extra", [
+        ["--split-manifest", "split.npz"],
+        ["--manifest-key", "env2_test"],
+    ])
+    def test_manifest_arguments_must_be_paired(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        extra: list[str],
+    ) -> None:
+        from scripts.export_demo_video import parse_args
+
+        monkeypatch.setattr(sys, "argv", [
+            "export_demo_video.py",
+            "--checkpoint", "model.pth",
+            "--dataset-root", "data/mmfi_pose",
+            "--action", "A01",
+            *extra,
+        ])
+        with pytest.raises(SystemExit):
+            parse_args()
+        assert (
+            "--split-manifest and --manifest-key must be provided together"
+            in capsys.readouterr().err
+        )
+
+
+class TestManifestLoading:
+    def test_manifest_hash_and_split_reach_loaders(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import argparse
+        import scripts.export_demo_video as module
+
+        manifest = argparse.Namespace(manifest_hash="abc123")
+        calls: dict[str, object] = {}
+        monkeypatch.setattr(module, "load_manifest", lambda path, root: manifest)
+        monkeypatch.setattr(
+            module,
+            "load_checkpoint_model",
+            lambda path, device, expected_manifest_hash=None: (
+                calls.update(hash=expected_manifest_hash) or "model"
+            ),
+        )
+        monkeypatch.setattr(
+            module,
+            "build_evaluation_dataset",
+            lambda dataset_root, manifest=None, manifest_key=None: (
+                calls.update(manifest=manifest, key=manifest_key) or "dataset"
+            ),
+        )
+        args = argparse.Namespace(
+            checkpoint="model.pth",
+            dataset_root="data/mmfi_pose",
+            split_manifest="split.npz",
+            manifest_key="env2_test",
+        )
+
+        result = module.load_export_model_and_dataset(args, torch.device("cpu"))
+
+        assert result == ("model", "dataset")
+        assert calls == {
+            "hash": "abc123",
+            "manifest": manifest,
+            "key": "env2_test",
+        }
+
 
 class TestFfmpegCheck:
     """Tests for ffmpeg availability check."""

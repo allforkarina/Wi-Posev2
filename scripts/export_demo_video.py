@@ -34,7 +34,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from data.memmap_dataset import MemmapDataset
-from eval import load_checkpoint_model
+from data.split_manifest import load_manifest
+from eval import build_evaluation_dataset, load_checkpoint_model
 from evaluation.pose_viz import (
     BONE_EDGES,
     JOINT_COLORS,
@@ -511,6 +512,29 @@ def encode_gif(
 # ---------------------------------------------------------------------------
 
 
+def load_export_model_and_dataset(
+    args: argparse.Namespace,
+    device: torch.device,
+) -> tuple[torch.nn.Module, MemmapDataset]:
+    """Load a checkpoint and its manifest-consistent evaluation dataset."""
+    manifest = (
+        load_manifest(args.split_manifest, args.dataset_root)
+        if args.split_manifest
+        else None
+    )
+    model = load_checkpoint_model(
+        args.checkpoint,
+        device,
+        expected_manifest_hash=manifest.manifest_hash if manifest else None,
+    )
+    dataset = build_evaluation_dataset(
+        dataset_root=args.dataset_root,
+        manifest=manifest,
+        manifest_key=args.manifest_key,
+    )
+    return model, dataset
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Export side-by-side GT-vs-Pred pose comparison video.",
@@ -561,14 +585,21 @@ def parse_args() -> argparse.Namespace:
         help="Generate only MP4 (skip GIF).",
     )
     parser.add_argument(
+        "--split-manifest", default=None,
+        help="Path to a deterministic split manifest.",
+    )
+    parser.add_argument(
         "--manifest-key", default=None,
-        help="Dataset split key (e.g. 'test'). Uses full dataset if not set.",
+        help="Named array in --split-manifest (e.g. env2_test).",
     )
     parser.add_argument(
         "--device", default="cuda",
         help="Device for inference (default: cuda).",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if bool(args.split_manifest) != bool(args.manifest_key):
+        parser.error("--split-manifest and --manifest-key must be provided together")
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -589,14 +620,12 @@ def main() -> None:
     print(f"Device: {device}")
     print(f"Output dir: {output_dir}")
 
-    # --- 1. Load model ---
+    # --- 1. Load model and dataset ---
     print(f"Loading checkpoint: {args.checkpoint}")
-    model = load_checkpoint_model(args.checkpoint, device)
-
-    # --- 2. Build dataset and collect frames ---
     print(f"Loading dataset: {args.dataset_root}")
-    dataset = MemmapDataset(data_dir=args.dataset_root, split="all")
+    model, dataset = load_export_model_and_dataset(args, device)
 
+    # --- 2. Collect frames ---
     print(f"Collecting frames for action={args.action}, subject={args.subject}...")
     frames, available_subjects = collect_action_frames(
         dataset, action=args.action, subject=args.subject
