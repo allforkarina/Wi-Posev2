@@ -188,7 +188,7 @@ class TestParseArgs:
         args = parse_args()
         assert args.checkpoint == "model.pth"
         assert args.dataset_root == "data/mmfi_pose"
-        assert args.action == 0
+        assert args.action == "0"
 
     def test_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Check all default values."""
@@ -201,9 +201,9 @@ class TestParseArgs:
             "--action", "0",
         ])
         args = parse_args()
-        assert args.fps == 18
-        assert args.resolution == "1280x720"
-        assert args.subject == 0
+        assert args.fps == 18.0
+        assert args.resolution == (1280, 720)
+        assert args.subject is None
         assert args.output_dir == "outputs/demo_videos"
         assert args.model_label == "WiFlow v2"
         assert args.keep_frames is False
@@ -222,7 +222,75 @@ class TestParseArgs:
             "--resolution", "720p",
         ])
         args = parse_args()
-        assert args.resolution == "720p"
+        assert args.resolution == (1280, 720)
+
+    def test_action_and_subject_are_exact_labels(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.export_demo_video import parse_args
+
+        monkeypatch.setattr(sys, "argv", [
+            "export_demo_video.py",
+            "--checkpoint", "model.pth",
+            "--dataset-root", "data/mmfi_pose",
+            "--action", "A01",
+            "--subject", "S03",
+        ])
+        args = parse_args()
+        assert args.action == "A01"
+        assert args.subject == "S03"
+
+    @pytest.mark.parametrize("fps", ["0", "-1"])
+    def test_non_positive_fps_is_rejected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fps: str,
+    ) -> None:
+        from scripts.export_demo_video import parse_args
+
+        monkeypatch.setattr(sys, "argv", [
+            "export_demo_video.py",
+            "--checkpoint", "model.pth",
+            "--dataset-root", "data/mmfi_pose",
+            "--action", "A01",
+            "--fps", fps,
+        ])
+        with pytest.raises(SystemExit):
+            parse_args()
+
+    @pytest.mark.parametrize("resolution", ["0x720", "1279x720", "1280x721"])
+    def test_invalid_video_resolution_is_rejected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        resolution: str,
+    ) -> None:
+        from scripts.export_demo_video import parse_args
+
+        monkeypatch.setattr(sys, "argv", [
+            "export_demo_video.py",
+            "--checkpoint", "model.pth",
+            "--dataset-root", "data/mmfi_pose",
+            "--action", "A01",
+            "--resolution", resolution,
+        ])
+        with pytest.raises(SystemExit):
+            parse_args()
+
+    def test_output_only_flags_are_mutually_exclusive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from scripts.export_demo_video import parse_args
+
+        monkeypatch.setattr(sys, "argv", [
+            "export_demo_video.py",
+            "--checkpoint", "model.pth",
+            "--dataset-root", "data/mmfi_pose",
+            "--action", "A01",
+            "--gif-only",
+            "--mp4-only",
+        ])
+        with pytest.raises(SystemExit):
+            parse_args()
 
 
 class TestFfmpegCheck:

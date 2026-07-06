@@ -71,7 +71,24 @@ def parse_resolution(raw: str) -> tuple[int, int]:
         w, h = int(parts[0]), int(parts[1])
     except ValueError:
         raise argparse.ArgumentTypeError(f"Invalid resolution: {raw!r}")
+    if w <= 0 or h <= 0:
+        raise argparse.ArgumentTypeError("Resolution dimensions must be positive")
+    if w % 2 or h % 2:
+        raise argparse.ArgumentTypeError(
+            "Resolution dimensions must be even for H.264 yuv420p output"
+        )
     return w, h
+
+
+def positive_float(raw: str) -> float:
+    """Parse a strictly positive floating-point CLI value."""
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Expected a number, got {raw!r}") from exc
+    if value <= 0:
+        raise argparse.ArgumentTypeError("Value must be greater than zero")
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -507,23 +524,23 @@ def parse_args() -> argparse.Namespace:
         help="Path to the NPY memmap dataset directory.",
     )
     parser.add_argument(
-        "--action", type=int, required=True,
-        help="Action class index to visualize.",
+        "--action", required=True,
+        help="Exact action label to visualize (e.g. A01).",
     )
     parser.add_argument(
-        "--subject", type=int, default=0,
-        help="Subject index within the action (0 = first available).",
+        "--subject", default=None,
+        help="Exact subject label (e.g. S03). Uses the first available if omitted.",
     )
     parser.add_argument(
         "--output-dir", default="outputs/demo_videos",
         help="Output directory for video files.",
     )
     parser.add_argument(
-        "--fps", type=float, default=18,
+        "--fps", type=positive_float, default=18.0,
         help="Frames per second (default: 18).",
     )
     parser.add_argument(
-        "--resolution", default="1280x720",
+        "--resolution", type=parse_resolution, default=RESOLUTION_PRESETS["720p"],
         help="Output resolution: WxH or preset (720p, 1080p). Default: 1280x720.",
     )
     parser.add_argument(
@@ -534,11 +551,12 @@ def parse_args() -> argparse.Namespace:
         "--keep-frames", action="store_true", default=False,
         help="Keep intermediate PNG frames after encoding.",
     )
-    parser.add_argument(
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
         "--gif-only", action="store_true", default=False,
         help="Generate only GIF (skip MP4).",
     )
-    parser.add_argument(
+    output_group.add_argument(
         "--mp4-only", action="store_true", default=False,
         help="Generate only MP4 (skip GIF).",
     )
@@ -562,7 +580,7 @@ def main() -> None:
     args = parse_args()
     check_ffmpeg()
 
-    width, height = parse_resolution(args.resolution)
+    width, height = args.resolution
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
