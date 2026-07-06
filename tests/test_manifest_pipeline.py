@@ -253,6 +253,7 @@ def test_evaluation_outputs_include_one_summary_row(tmp_path: Path) -> None:
         "overall": {
             "mpjpe": 0.25,
             "bone_error": 0.1,
+            "pck_0_05": 0.1,
             "pck_0_1": 0.2,
             "pck_0_2": 0.4,
             "pck_0_3": 0.6,
@@ -271,5 +272,5 @@ def test_evaluation_outputs_include_one_summary_row(tmp_path: Path) -> None:
     write_evaluation_outputs(tmp_path, result)
 
     summary = (tmp_path / "benchmark_summary.csv").read_text(encoding="utf-8")
-    assert "sample_count,mpjpe,bone_error,pck_0_1,pck_0_2" in summary
-    assert "3,0.25,0.1,0.2,0.4" in summary
+    assert "sample_count,mpjpe,bone_error,pck_0_05,pck_0_1,pck_0_2" in summary
+    assert "3,0.25,0.1,0.1,0.2,0.4" in summary
