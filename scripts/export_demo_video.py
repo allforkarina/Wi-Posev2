@@ -9,7 +9,9 @@ Usage:
     python scripts/export_demo_video.py \\
         --checkpoint outputs/train/best_val_pck_0_2.pth \\
         --dataset-root data/mmfi_pose \\
-        --action 0
+        --action A01 \\
+        --subject S03 \\
+        --mp4-only
 """
 
 from __future__ import annotations
