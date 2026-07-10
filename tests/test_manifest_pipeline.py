@@ -178,6 +178,56 @@ def test_training_cli_accepts_manifest_arguments(monkeypatch: pytest.MonkeyPatch
     assert args.device == "cpu"
 
 
+def test_source_only_manifest_keys_default_to_env1_splits() -> None:
+    from train import resolve_source_manifest_keys
+
+    config = TrainConfig(dataset_root="dataset", mode="source_only")
+
+    assert resolve_source_manifest_keys(config) == {
+        "train": "env1_train",
+        "val": "env1_val",
+        "test": "env1_test",
+    }
+
+
+def test_source_only_manifest_keys_accept_target_fewshot_train_and_target_val() -> None:
+    from train import resolve_source_manifest_keys
+
+    config = TrainConfig(
+        dataset_root="dataset",
+        mode="source_only",
+        source_train_key="env2_fewshot_8100",
+        source_val_key="env2_val",
+        source_test_key="env2_test",
+    )
+
+    assert resolve_source_manifest_keys(config) == {
+        "train": "env2_fewshot_8100",
+        "val": "env2_val",
+        "test": "env2_test",
+    }
+
+
+def test_training_cli_accepts_source_only_manifest_key_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "argv", [
+        "train.py",
+        "--mode", "source_only",
+        "--dataset-root", "dataset",
+        "--split-manifest", "split.npz",
+        "--source-train-key", "env2_fewshot_8100",
+        "--source-val-key", "env2_val",
+        "--source-test-key", "env2_test",
+    ])
+
+    args = parse_args()
+
+    assert args.source_train_key == "env2_fewshot_8100"
+    assert args.source_val_key == "env2_val"
+    assert args.source_test_key == "env2_test"
+
+
 def test_training_config_rejects_mlp_latent_structure_loss() -> None:
     config = TrainConfig(
         dataset_root="dataset",

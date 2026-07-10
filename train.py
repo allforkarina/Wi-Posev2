@@ -107,8 +107,20 @@ class TrainConfig:
     freeze_tier: int | None = None
     split_manifest: str | None = None
     few_shot_key: str | None = None
+    source_train_key: str | None = None
+    source_val_key: str | None = None
+    source_test_key: str | None = None
     split_mode: str | None = None
     manifest_hash: str | None = None
+
+
+def resolve_source_manifest_keys(config: TrainConfig) -> dict[str, str]:
+    """Resolve manifest keys used by source-only training."""
+    return {
+        "train": config.source_train_key or "env1_train",
+        "val": config.source_val_key or "env1_val",
+        "test": config.source_test_key or "env1_test",
+    }
 
 
 def prepare_training_config(
@@ -125,6 +137,9 @@ def prepare_training_config(
         if not config.few_shot_key:
             raise ValueError("Manifest-backed finetuning requires --few-shot-key")
         manifest.indices(config.few_shot_key)
+    elif config.mode == "source_only":
+        for key in resolve_source_manifest_keys(config).values():
+            manifest.indices(key)
     prepared = replace(
         config,
         split_manifest=str(manifest.path),
@@ -776,11 +791,12 @@ def apply_finetune_tier(model: nn.Module, tier: int = 1) -> int:
 def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path) -> None:
     if config.split_manifest:
         manifest = load_manifest(config.split_manifest, config.dataset_root)
+        source_manifest_keys = resolve_source_manifest_keys(config)
         loaders = {
             split: create_manifest_data_loader(
                 data_dir=config.dataset_root,
                 manifest=manifest,
-                key=f"env1_{split}",
+                key=source_manifest_keys[split],
                 batch_size=config.batch_size,
                 num_workers=config.num_workers,
                 shuffle=split == "train",
@@ -1332,6 +1348,30 @@ def parse_args() -> argparse.Namespace:
         "--few-shot-key",
         default=None,
         help="Named env2 few-shot array in --split-manifest for finetuning.",
+    )
+    parser.add_argument(
+        "--source-train-key",
+        default=None,
+        help=(
+            "Named manifest array for source_only training. "
+            "Defaults to env1_train when --split-manifest is provided."
+        ),
+    )
+    parser.add_argument(
+        "--source-val-key",
+        default=None,
+        help=(
+            "Named manifest array for source_only validation. "
+            "Defaults to env1_val when --split-manifest is provided."
+        ),
+    )
+    parser.add_argument(
+        "--source-test-key",
+        default=None,
+        help=(
+            "Named manifest array for source_only test loader construction. "
+            "Defaults to env1_test when --split-manifest is provided."
+        ),
     )
     parser.add_argument("--few-shot-subjects", type=int, default=4)
     parser.add_argument("--few-shot-frames", type=int, default=5)
