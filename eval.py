@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import sys
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
@@ -384,16 +383,8 @@ def parse_args() -> argparse.Namespace:
         help="Named array in --split-manifest, such as env1_test or env2_test.",
     )
     parser.add_argument(
-        "--feature-viz", action="store_true", default=False,
-        help="Generate research-grade feature visualization figures.",
-    )
-    parser.add_argument(
         "--pose-viz", action="store_true", default=False,
         help="Generate per-subject joint scatter plots (GT vs Prediction).",
-    )
-    parser.add_argument(
-        "--num-action-samples", type=int, default=3,
-        help="Samples per action type for feature visualization (default: 3).",
     )
     parser.add_argument(
         "--figure-width", type=float, default=None,
@@ -408,10 +399,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.feature_viz and args.pose_viz:
-        print("Error: --feature-viz and --pose-viz are mutually exclusive", file=sys.stderr)
-        sys.exit(2)
-
     if bool(args.split_manifest) != bool(args.manifest_key):
         raise ValueError("--split-manifest and --manifest-key must be provided together")
     eval_envs = tuple(args.eval_envs) if args.eval_envs else None
@@ -492,26 +479,6 @@ def main() -> None:
             num_workers=args.num_workers,
         )
         print("Pose visualization complete.")
-
-    # --- feature visualization (optional, separate pass) ---
-    elif args.feature_viz:
-        from evaluation.feature_viz import run_feature_visualization
-
-        print("\n--- Feature Visualization ---")
-        run_feature_visualization(
-            model=model,
-            loader=test_loader,
-            dataset_root=args.dataset_root,
-            output_dir=output_dir,
-            device=device,
-            decoder_type=model.decoder_type,
-            num_action_samples=args.num_action_samples,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            figure_width=args.figure_width,
-            figure_height=args.figure_height,
-        )
-        print("Feature visualization complete.")
 
 
 if __name__ == "__main__":
