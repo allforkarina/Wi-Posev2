@@ -37,3 +37,12 @@ outputs/
 .worktrees/
 .DS_Store
 Thumbs.db
+
+# Local agent state and generated handoff artifacts
+.agents/
+.claude/
+.superpowers/
+demo_videos/
+demo_videos.zip
+final_report_*/
+*.zip

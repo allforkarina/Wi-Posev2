@@ -1,0 +1,12 @@
+name: WiFiPose
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pytorch
+  - numpy
+  - scipy
+  - matplotlib
+  - pillow
+  - scikit-learn

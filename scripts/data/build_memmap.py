@@ -5,12 +5,12 @@ Pre-computes 3 normalization variants and stores each as a single .npy file.
 Training loader uses np.load(path, mmap_mode='r') for zero-copy OS-cached access.
 
 Input:
-    /data/WiFiPose/dataset/dataset/{ACTION}/{SUBJECT}/
+    <raw-mmfi-root>/{ACTION}/{SUBJECT}/
         wifi-csi/frame*.mat   ← CSIamp (3, 114, 10) float64
         rgb/frame*.npy        ← COCO17 keypoints (17, 2) float32
 
 Output:
-    /data/WiFiPose/dataset/mmfi_pose_v3/
+    <memmap-root>/
         csi_gminmax.npy  ← global_minmax normalized (N, 64, 3, 114) float32
         csi_gzscore.npy  ← global_zscore normalized (N, 64, 3, 114) float32
         csi_zscore.npy   ← per-sample zscore normalized (N, 64, 3, 114) float32
@@ -19,9 +19,9 @@ Output:
         stats.json       ← normalization statistics
 
 Usage:
-    python scripts/build_memmap.py \
-        --src /data/WiFiPose/dataset/dataset \
-        --dst /data/WiFiPose/dataset/mmfi_pose_v3 \
+    python scripts/data/build_memmap.py \
+        --src <raw-mmfi-root> \
+        --dst <memmap-root> \
         --train-subjects S01 S02 S03 S04 S05 S06 S07 S08 S09 S10 \
         --workers 8
 """
@@ -238,8 +238,8 @@ def safe_div(a, b, eps=1e-6):
 
 def main():
     parser = argparse.ArgumentParser(description="Build memmap .npy files from MM-Fi dataset")
-    parser.add_argument("--src", default="/data/WiFiPose/dataset/dataset")
-    parser.add_argument("--dst", default="/data/WiFiPose/dataset/mmfi_pose_v3")
+    parser.add_argument("--src", required=True, help="Raw MM-Fi dataset root.")
+    parser.add_argument("--dst", required=True, help="Destination directory for memmap files.")
     parser.add_argument("--train-subjects", nargs="+",
                         default=["S01","S02","S03","S04","S05","S06","S07","S08","S09","S10"])
     parser.add_argument("--pose-min", type=float, default=-0.8)
