@@ -18,7 +18,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from models.skeleton import NUM_OPENPOSE_KEYPOINTS, OPENPOSE_BONE_EDGES
 
 matplotlib.use("TkAgg")

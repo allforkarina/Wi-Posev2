@@ -32,7 +32,7 @@ import torch
 # ---------------------------------------------------------------------------
 # Project path setup (no package install — scripts add root to sys.path)
 # ---------------------------------------------------------------------------
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from data.memmap_dataset import MemmapDataset

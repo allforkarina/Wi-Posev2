@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -241,7 +241,7 @@ def _benchmark_command(
 ) -> tuple[str, ...]:
     return (
         sys.executable,
-        str(ROOT / "scripts" / "benchmark_wipose.py"),
+        str(ROOT / "scripts" / "evaluation" / "benchmark_wipose.py"),
         "--dataset-root", str(config.dataset_root),
         "--checkpoint", str(task.checkpoint_path),
         "--split-manifest", str(task.manifest_path),
@@ -258,7 +258,7 @@ def _ensure_manifests(config: SuiteConfig, tasks: Sequence[ExperimentTask]) -> N
         return
     _run_command((
         sys.executable,
-        str(ROOT / "scripts" / "build_split_manifests.py"),
+        str(ROOT / "scripts" / "data" / "build_split_manifests.py"),
         "--dataset-root", str(config.dataset_root),
         "--output-dir", str(config.output_root / "manifests"),
         "--seed", str(config.seed),

@@ -34,7 +34,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from data.heatmap_gt import coco17_to_openpose18, valid_point
 
 POSE_MIN_DEFAULT = -0.8
