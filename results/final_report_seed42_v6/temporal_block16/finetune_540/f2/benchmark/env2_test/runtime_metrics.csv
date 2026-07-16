@@ -1,0 +1,2 @@
+total_parameters,trainable_parameters,estimated_macs,estimated_flops,mean_latency_ms,median_latency_ms,p95_latency_ms,fps,peak_cuda_memory_mb,device,warmup_iterations,measure_iterations,operation_count_limitation
+2716145,165632,670579328,1341158656,3.066401598453522,3.04038405418396,3.1139952182769775,326.11514437780426,27.56396484375,cuda,20,100,"Counts Conv2d, Linear, and MultiheadAttention only; excludes normalization, activation, indexing, pooling, and elementwise operations."
