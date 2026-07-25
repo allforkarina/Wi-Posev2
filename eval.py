@@ -13,6 +13,12 @@ import torch
 from torch.utils.data import DataLoader
 
 from data.memmap_dataset import MemmapDataset
+from data.pose_schema import (
+    CANONICAL_BONE_EDGES,
+    JOINT_GROUPS,
+    JOINT_NAMES,
+    TORSO_DIAGONALS,
+)
 from data.split_manifest import SplitManifest, load_manifest
 from dataloader import create_memmap_data_loader, memmap_collate_fn
 from models import WiFlowModel
@@ -187,6 +193,263 @@ def _build_joint_rows(
     ]
 
 
+def _numpy_torso_scale(target: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    diagonals = [
+        np.linalg.norm(target[:, start] - target[:, end], axis=-1)
+        for start, end in TORSO_DIAGONALS
+    ]
+    return np.maximum(np.mean(diagonals, axis=0), eps)
+
+
+def _procrustes_mpjpe(prediction: np.ndarray, target: np.ndarray) -> float:
+    pred_center = prediction - prediction.mean(axis=1, keepdims=True)
+    target_center = target - target.mean(axis=1, keepdims=True)
+    pred_norm = np.maximum(
+        np.linalg.norm(pred_center.reshape(len(prediction), -1), axis=1),
+        1e-8,
+    )
+    target_norm = np.maximum(
+        np.linalg.norm(target_center.reshape(len(target), -1), axis=1),
+        1e-8,
+    )
+    pred_unit = pred_center / pred_norm[:, None, None]
+    target_unit = target_center / target_norm[:, None, None]
+    covariance = np.einsum("nji,njk->nik", pred_unit, target_unit)
+    left, _, right_t = np.linalg.svd(covariance)
+    rotation = np.matmul(left, right_t)
+    reflected = np.linalg.det(rotation) < 0
+    if reflected.any():
+        left[reflected, :, -1] *= -1
+        rotation = np.matmul(left, right_t)
+    aligned = (
+        np.matmul(pred_unit, rotation) * target_norm[:, None, None]
+        + target.mean(axis=1, keepdims=True)
+    )
+    return float(np.linalg.norm(aligned - target, axis=-1).mean())
+
+
+def _array_metrics(prediction: np.ndarray, target: np.ndarray) -> dict[str, float]:
+    if len(prediction) == 0:
+        raise ValueError("Cannot compute metrics for an empty evaluation subset")
+    errors = np.linalg.norm(prediction - target, axis=-1)
+    coordinate_delta = np.abs(prediction - target)
+    scale = _numpy_torso_scale(target)
+    normalized_error = errors / scale[:, None]
+    pck_thresholds = np.linspace(0.0, 0.5, 101)
+    pck_curve = np.asarray([
+        np.mean(normalized_error < threshold)
+        for threshold in pck_thresholds
+    ])
+
+    flattened_prediction = prediction.reshape(len(prediction), -1)
+    flattened_target = target.reshape(len(target), -1)
+    scale_factor = (
+        np.sum(flattened_prediction * flattened_target, axis=1)
+        / np.maximum(np.sum(flattened_prediction ** 2, axis=1), 1e-8)
+    )
+    scale_aligned = prediction * scale_factor[:, None, None]
+    root_prediction = prediction - prediction[:, :1]
+    root_target = target - target[:, :1]
+
+    edge_index = np.asarray(CANONICAL_BONE_EDGES, dtype=np.int64)
+    pred_bones = (
+        prediction[:, edge_index[:, 1]] - prediction[:, edge_index[:, 0]]
+    )
+    target_bones = target[:, edge_index[:, 1]] - target[:, edge_index[:, 0]]
+    pred_lengths = np.linalg.norm(pred_bones, axis=-1)
+    target_lengths = np.linalg.norm(target_bones, axis=-1)
+    bone_absolute = np.abs(pred_lengths - target_lengths)
+    bone_relative = bone_absolute / np.maximum(target_lengths, 1e-6)
+    cosine = np.sum(pred_bones * target_bones, axis=-1) / np.maximum(
+        pred_lengths * target_lengths,
+        1e-8,
+    )
+    identical_bones = np.all(
+        np.isclose(pred_bones, target_bones, rtol=0.0, atol=1e-8),
+        axis=-1,
+    )
+    cosine = np.where(identical_bones, 1.0, cosine)
+    bone_angle = np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0)))
+
+    symmetric_paths = (
+        ((16, 5), (15, 14)),
+        ((5, 2), (14, 17)),
+        ((11, 8), (9, 13)),
+        ((8, 12), (13, 10)),
+    )
+    symmetry_errors = []
+    for left_edge, right_edge in symmetric_paths:
+        pred_difference = (
+            np.linalg.norm(
+                prediction[:, left_edge[0]] - prediction[:, left_edge[1]],
+                axis=-1,
+            )
+            - np.linalg.norm(
+                prediction[:, right_edge[0]] - prediction[:, right_edge[1]],
+                axis=-1,
+            )
+        )
+        target_difference = (
+            np.linalg.norm(
+                target[:, left_edge[0]] - target[:, left_edge[1]],
+                axis=-1,
+            )
+            - np.linalg.norm(
+                target[:, right_edge[0]] - target[:, right_edge[1]],
+                axis=-1,
+            )
+        )
+        symmetry_errors.append(np.abs(pred_difference - target_difference))
+
+    invalid_skeleton = (
+        ~np.isfinite(prediction).all(axis=(1, 2))
+        | (pred_lengths < 1e-6).any(axis=1)
+    )
+    return {
+        "mpjpe": float(errors.mean()),
+        "median_joint_error": float(np.median(errors)),
+        "p90_joint_error": float(np.percentile(errors, 90)),
+        "p95_joint_error": float(np.percentile(errors, 95)),
+        "coordinate_rmse": float(np.sqrt(np.mean((prediction - target) ** 2))),
+        "x_mae": float(coordinate_delta[..., 0].mean()),
+        "y_mae": float(coordinate_delta[..., 1].mean()),
+        "n_mpjpe": float(np.linalg.norm(scale_aligned - target, axis=-1).mean()),
+        "root_relative_mpjpe": float(
+            np.linalg.norm(root_prediction - root_target, axis=-1).mean()
+        ),
+        "pa_mpjpe": _procrustes_mpjpe(prediction, target),
+        "bone_error": float(bone_absolute.mean()),
+        "relative_bone_length_error": float(bone_relative.mean()),
+        "bone_direction_error_deg": float(bone_angle.mean()),
+        "symmetry_error": float(np.mean(symmetry_errors)),
+        "invalid_skeleton_rate": float(invalid_skeleton.mean()),
+        "pck_0_05": float(np.mean(normalized_error < 0.05)),
+        "pck_0_1": float(np.mean(normalized_error < 0.1)),
+        "pck_0_2": float(np.mean(normalized_error < 0.2)),
+        "pck_0_3": float(np.mean(normalized_error < 0.3)),
+        "pck_0_4": float(np.mean(normalized_error < 0.4)),
+        "pck_0_5": float(np.mean(normalized_error < 0.5)),
+        "pck_auc_0_5": float(np.trapz(pck_curve, pck_thresholds) / 0.5),
+    }
+
+
+def _joint_metric_rows(
+    prediction: np.ndarray,
+    target: np.ndarray,
+) -> list[dict[str, float | int | str]]:
+    errors = np.linalg.norm(prediction - target, axis=-1)
+    normalized = errors / _numpy_torso_scale(target)[:, None]
+    return [
+        {
+            "joint_index": joint_index,
+            "joint_name": JOINT_NAMES[joint_index],
+            "sample_count": len(prediction),
+            "mpjpe": float(errors[:, joint_index].mean()),
+            "median_error": float(np.median(errors[:, joint_index])),
+            "p90_error": float(np.percentile(errors[:, joint_index], 90)),
+            "p95_error": float(np.percentile(errors[:, joint_index], 95)),
+            "pck_0_2": float(np.mean(normalized[:, joint_index] < 0.2)),
+        }
+        for joint_index in range(errors.shape[1])
+    ]
+
+
+def _joint_group_rows(
+    prediction: np.ndarray,
+    target: np.ndarray,
+) -> list[dict[str, float | int | str]]:
+    errors = np.linalg.norm(prediction - target, axis=-1)
+    normalized = errors / _numpy_torso_scale(target)[:, None]
+    rows: list[dict[str, float | int | str]] = []
+    for group_name, joints in JOINT_GROUPS.items():
+        group_errors = errors[:, joints]
+        rows.append({
+            "joint_group": group_name,
+            "joint_indices": " ".join(str(index) for index in joints),
+            "sample_count": len(prediction),
+            "mpjpe": float(group_errors.mean()),
+            "median_error": float(np.median(group_errors)),
+            "p90_error": float(np.percentile(group_errors, 90)),
+            "pck_0_2": float(np.mean(normalized[:, joints] < 0.2)),
+        })
+    return rows
+
+
+def _category_rows(
+    labels: np.ndarray,
+    prediction: np.ndarray,
+    target: np.ndarray,
+    label_name: str,
+) -> list[dict[str, float | int | str]]:
+    rows: list[dict[str, float | int | str]] = []
+    for label in sorted(set(labels.tolist())):
+        mask = labels == label
+        metrics = _array_metrics(prediction[mask], target[mask])
+        rows.append({
+            label_name: str(label),
+            "sample_count": int(mask.sum()),
+            **metrics,
+        })
+    return rows
+
+
+def _temporal_metrics(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    environments: np.ndarray,
+    subjects: np.ndarray,
+    actions: np.ndarray,
+    frame_indices: np.ndarray,
+) -> dict[str, float | int]:
+    grouped: dict[tuple[str, str, str], list[int]] = {}
+    for index, key in enumerate(zip(environments, subjects, actions)):
+        grouped.setdefault(tuple(str(value) for value in key), []).append(index)
+    velocity_errors: list[np.ndarray] = []
+    acceleration_errors: list[np.ndarray] = []
+    for indices in grouped.values():
+        ordered = sorted(indices, key=lambda value: int(frame_indices[value]))
+        if len(ordered) < 2:
+            continue
+        for left, right in zip(ordered[:-1], ordered[1:]):
+            delta = int(frame_indices[right]) - int(frame_indices[left])
+            if delta <= 0:
+                continue
+            pred_velocity = (prediction[right] - prediction[left]) / delta
+            target_velocity = (target[right] - target[left]) / delta
+            velocity_errors.append(
+                np.linalg.norm(pred_velocity - target_velocity, axis=-1)
+            )
+        for first, middle, last in zip(ordered[:-2], ordered[1:-1], ordered[2:]):
+            delta_one = int(frame_indices[middle]) - int(frame_indices[first])
+            delta_two = int(frame_indices[last]) - int(frame_indices[middle])
+            if delta_one <= 0 or delta_two <= 0:
+                continue
+            pred_v1 = (prediction[middle] - prediction[first]) / delta_one
+            pred_v2 = (prediction[last] - prediction[middle]) / delta_two
+            target_v1 = (target[middle] - target[first]) / delta_one
+            target_v2 = (target[last] - target[middle]) / delta_two
+            time_step = (delta_one + delta_two) / 2.0
+            acceleration_errors.append(
+                np.linalg.norm(
+                    (pred_v2 - pred_v1) / time_step
+                    - (target_v2 - target_v1) / time_step,
+                    axis=-1,
+                )
+            )
+    return {
+        "temporal_velocity_error": (
+            float(np.concatenate(velocity_errors).mean())
+            if velocity_errors else float("nan")
+        ),
+        "temporal_acceleration_error": (
+            float(np.concatenate(acceleration_errors).mean())
+            if acceleration_errors else float("nan")
+        ),
+        "temporal_pair_count": len(velocity_errors),
+        "temporal_triplet_count": len(acceleration_errors),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Single-pass evaluation
 # ---------------------------------------------------------------------------
@@ -205,44 +468,57 @@ def run_evaluation(
     - ``action_rows``: per-action breakdown.
     - ``environment_rows``: per-environment breakdown.
     """
-    totals: Dict[str, float] = {}
-    action_totals: Dict[str, Dict[str, float]] = {}
-    environment_totals: Dict[str, Dict[str, float]] = {}
-    joint_error_batches: list[torch.Tensor] = []
-    joint_pck_batches: list[torch.Tensor] = []
     all_predictions: list[np.ndarray] = []
     all_targets: list[np.ndarray] = []
-    sample_count = 0
+    all_actions: list[str] = []
+    all_environments: list[str] = []
+    all_subjects: list[str] = []
+    all_frame_indices: list[int] = []
 
     with torch.no_grad():
         for batch in loader:
             model_input, target = prepare_model_input(batch, device)
             prediction = extract_prediction_keypoints(model(model_input))
-
-            # --- overall metrics (mpjpe, pck_*) ---
-            metrics = compute_metrics(prediction, target)
-            bs = target.shape[0]
-            sample_count += bs
-            _update_totals(totals, metrics, bs)
-
-            # --- per-joint & per-group metrics ---
-            errors = _joint_errors(prediction, target).detach().cpu()
-            pck_mask = _joint_pck(prediction, target).detach().cpu()
-            joint_error_batches.append(errors)
-            joint_pck_batches.append(pck_mask)
-            _update_group_totals(action_totals, batch["action"], errors, pck_mask)
-            _update_group_totals(environment_totals, batch["environment"], errors, pck_mask)
-
-            # --- diagnostic: collect raw pred/target for variance analysis ---
             all_predictions.append(prediction.detach().cpu().numpy())
             all_targets.append(target.detach().cpu().numpy())
+            all_actions.extend(str(value) for value in batch["action"])
+            all_environments.extend(str(value) for value in batch["environment"])
+            all_subjects.extend(str(value) for value in batch["sample"])
+            all_frame_indices.extend(int(value) for value in batch["frame_idx"])
+
+    predictions = np.concatenate(all_predictions, axis=0)
+    targets = np.concatenate(all_targets, axis=0)
+    actions = np.asarray(all_actions)
+    environments = np.asarray(all_environments)
+    subjects = np.asarray(all_subjects)
+    frame_indices = np.asarray(all_frame_indices, dtype=np.int64)
+    overall = _array_metrics(predictions, targets)
+    overall.update(_temporal_metrics(
+        predictions,
+        targets,
+        environments,
+        subjects,
+        actions,
+        frame_indices,
+    ))
 
     return {
-        "sample_count": sample_count,
-        "overall": _average_metrics(totals, sample_count),
-        "joint_rows": _build_joint_rows(joint_error_batches, joint_pck_batches),
-        "action_rows": _build_group_rows(action_totals, "action"),
-        "environment_rows": _build_group_rows(environment_totals, "environment"),
+        "sample_count": len(predictions),
+        "overall": overall,
+        "joint_rows": _joint_metric_rows(predictions, targets),
+        "joint_group_rows": _joint_group_rows(predictions, targets),
+        "action_rows": _category_rows(
+            actions,
+            predictions,
+            targets,
+            "action",
+        ),
+        "environment_rows": _category_rows(
+            environments,
+            predictions,
+            targets,
+            "environment",
+        ),
         "diagnostic": _compute_diagnostics(all_predictions, all_targets),
     }
 
@@ -322,19 +598,13 @@ def write_evaluation_outputs(output_dir: str | Path, result: Mapping[str, Any]) 
     diagnostic_overall = result["diagnostic"]["overall"]
     summary = {
         "sample_count": int(result["sample_count"]),
-        "mpjpe": float(result["overall"]["mpjpe"]),
-        "bone_error": float(result["overall"]["bone_error"]),
-        "pck_0_05": float(result["overall"]["pck_0_05"]),
-        "pck_0_1": float(result["overall"]["pck_0_1"]),
-        "pck_0_2": float(result["overall"]["pck_0_2"]),
-        "pck_0_3": float(result["overall"]["pck_0_3"]),
-        "pck_0_4": float(result["overall"]["pck_0_4"]),
-        "pck_0_5": float(result["overall"]["pck_0_5"]),
+        **result["overall"],
         "overall_var_ratio": float(diagnostic_overall["overall_var_ratio"]),
         "overall_mean_pose_dist": float(diagnostic_overall["overall_mean_pose_dist"]),
     }
     _write_csv(output_dir / "benchmark_summary.csv", [summary])
     _write_csv(output_dir / "per_joint_metrics.csv", result["joint_rows"])
+    _write_csv(output_dir / "per_joint_group_metrics.csv", result["joint_group_rows"])
     _write_csv(output_dir / "per_action_metrics.csv", result["action_rows"])
     _write_csv(output_dir / "per_environment_metrics.csv", result["environment_rows"])
     _write_csv(output_dir / "per_joint_diagnostic.csv", result["diagnostic"]["joint_rows"])
@@ -393,6 +663,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--figure-height", type=float, default=None,
         help="Override default figure height in inches.",
+    )
+    parser.add_argument(
+        "--pose-viz-sampling",
+        choices=("random", "middle"),
+        default="random",
+    )
+    parser.add_argument("--pose-viz-seed", type=int, default=42)
+    parser.add_argument("--pose-viz-max-subjects-per-action", type=int, default=2)
+    parser.add_argument("--pose-viz-dpi", type=int, default=150)
+    parser.add_argument(
+        "--pose-viz-include-individuals",
+        action="store_true",
+        help="Also save per-sample figures; composites alone are the default.",
     )
     return parser.parse_args()
 
@@ -477,6 +760,11 @@ def main() -> None:
             figure_height=args.figure_height,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
+            sampling=args.pose_viz_sampling,
+            seed=args.pose_viz_seed,
+            max_subjects_per_action=args.pose_viz_max_subjects_per_action,
+            composite_only=not args.pose_viz_include_individuals,
+            dpi=args.pose_viz_dpi,
         )
         print("Pose visualization complete.")
 

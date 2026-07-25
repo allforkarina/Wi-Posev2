@@ -1,29 +1,27 @@
 # Wi-Posev2
 
-Wi-Posev2 estimates OpenPose18 2D poses from Wi-Fi CSI. The repository keeps
+Wi-Posev2 estimates a project-specific 18-joint 2D pose from Wi-Fi CSI. The repository keeps
 the core training/evaluation path, deterministic experiment manifests, report
 reproduction commands, benchmarking, and demo-video export.
 
 ## Setup
 
-```bash
-conda env create -f environment.yml
-conda activate WiFiPose
-```
+Create a Python 3.10 virtual environment and install the pinned dependencies
+from `requirements-delivery.txt` (or use `environment.yml` with Conda). On the delivery server, use `.venv/bin/python`
+directly so non-interactive jobs do not depend on shell activation.
 
 ## Core workflow
 
-```bash
-python scripts/data/build_memmap.py --src <raw-mmfi-root> --dst <memmap-root>
-python scripts/data/build_split_manifests.py --dataset-root <memmap-root> --output-dir outputs/manifests
-python train.py --mode source_only --dataset-root <memmap-root> --output-dir outputs/source
-python eval.py --dataset-root <memmap-root> --checkpoint outputs/source/best_val_pck_0_2.pth --output-dir outputs/eval
-python scripts/media/export_demo_video.py --help
-```
+The complete single-GPU delivery suite is launched by
+`scripts/experiments/run_delivery_experiments.sh`. It audits raw GT, builds an
+interrupt-resumable memmap, runs all experiments serially for seeds 42, 123,
+and 3407, and aggregates paired ablation effects. See
+`docs/EXPERIMENTS.md` for the one-line server command and output contract.
 
 `train.py` supports source-only training and cross-domain few-shot finetuning.
-`eval.py` writes metric CSVs and can generate pose comparisons with
-`--pose-viz`. Dataset roots, checkpoints, and generated outputs are local
+`eval.py` writes overall, tail-error, alignment, bone, joint-group, action,
+environment, and temporal diagnostic CSVs. It can generate bounded pose
+comparisons with `--pose-viz`. Dataset roots, checkpoints, and generated outputs are local
 artifacts and must not be committed.
 
 See [docs/HANDOFF.md](docs/HANDOFF.md) for interface contracts,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .skeleton import NUM_OPENPOSE_KEYPOINTS
+from data.pose_schema import NUM_KEYPOINTS
 
 
 class WiFlowMLPDecoder(nn.Module):
@@ -19,7 +19,7 @@ class WiFlowMLPDecoder(nn.Module):
             nn.Linear(1536, 1024),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(1024, NUM_OPENPOSE_KEYPOINTS * 2),
+            nn.Linear(1024, NUM_KEYPOINTS * 2),
         )
 
     def forward(
@@ -33,5 +33,5 @@ class WiFlowMLPDecoder(nn.Module):
             raise ValueError("MLP decoder does not expose joint latent features")
         pooled = x.mean(dim=(-2, -1))
         return self.coordinate_head(pooled).reshape(
-            x.shape[0], NUM_OPENPOSE_KEYPOINTS, 2
+            x.shape[0], NUM_KEYPOINTS, 2
         )

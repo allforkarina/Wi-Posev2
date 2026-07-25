@@ -5,6 +5,9 @@ from torch import nn
 
 
 AXIAL_ENCODER_MODES: tuple[str, ...] = (
+    "none",
+    "spatial_only",
+    "temporal_only",
     "spatial_then_temporal",
     "temporal_then_spatial",
     "parallel_sum",
@@ -75,7 +78,7 @@ class WiFlowAxialEncoder(nn.Module):
             spatial_input,
             spatial_input,
             spatial_input,
-            need_weights=True,
+            need_weights=False,
         )
         spatial_output = self.spatial_norm(spatial_output + spatial_input)
         return self._restore_spatial_attention_output(spatial_output, batch_size, spatial_tokens, temporal)
@@ -88,12 +91,18 @@ class WiFlowAxialEncoder(nn.Module):
             temporal_input,
             temporal_input,
             temporal_input,
-            need_weights=True,
+            need_weights=False,
         )
         temporal_output = self.temporal_norm(temporal_output + temporal_input)
         return self._restore_temporal_attention_output(temporal_output, batch_size, spatial_tokens, temporal)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.mode == "none":
+            return self.channel_projection(x)
+        if self.mode == "spatial_only":
+            return self.channel_projection(self._apply_spatial_attention(x))
+        if self.mode == "temporal_only":
+            return self.channel_projection(self._apply_temporal_attention(x))
         if self.mode == "spatial_then_temporal":
             x = self._apply_spatial_attention(x)
             x = self._apply_temporal_attention(x)

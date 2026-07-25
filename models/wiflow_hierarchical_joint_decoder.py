@@ -3,7 +3,9 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .skeleton import NUM_OPENPOSE_KEYPOINTS, build_normalized_adjacency
+from data.pose_schema import NUM_KEYPOINTS
+
+from .skeleton import build_normalized_adjacency
 
 
 class WiFlowHierarchicalJointDecoderStage(nn.Module):
@@ -66,17 +68,17 @@ class WiFlowHierarchicalJointDecoderStage(nn.Module):
 
 
 class WiFlowHierarchicalJointDecoder(nn.Module):
-    """Decode OpenPose18 coordinates through staged coarse-to-fine joint retrieval."""
+    """Decode custom 18-joint coordinates through staged joint retrieval."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.num_queries = NUM_OPENPOSE_KEYPOINTS
+        self.num_queries = NUM_KEYPOINTS
         self.embedding_dim = 256
         self.num_heads = 4
         self.stage_indices = (
-            (0, 1, 2, 5, 8, 11),
-            (3, 4, 6, 7, 9, 10, 12, 13),
-            (14, 15, 16, 17),
+            (0, 3, 4, 6, 7),
+            (15, 16, 9, 11, 14, 5, 13, 8),
+            (17, 1, 2, 10, 12),
         )
         self.stage_order = tuple(joint for stage in self.stage_indices for joint in stage)
         self.openpose_order = tuple(self.stage_order.index(joint) for joint in range(self.num_queries))

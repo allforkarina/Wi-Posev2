@@ -58,6 +58,11 @@ class MemmapDataset(Dataset):
         self._envs = meta["environment"]
         self._samples = meta["sample"]
         self._actions = meta["action"]
+        self._frame_indices = (
+            meta["frame_idx"]
+            if "frame_idx" in meta.files
+            else np.arange(len(self._actions), dtype=np.int64)
+        )
 
         if split_normalization is not None:
             lower, upper = split_normalization
@@ -168,7 +173,8 @@ class MemmapDataset(Dataset):
                 "env": str(self._envs[frame_idx]),
                 "subject": str(self._samples[frame_idx]),
                 "action": str(self._actions[frame_idx]),
-                "frame_idx": int(frame_idx),
+                "frame_idx": int(self._frame_indices[frame_idx]),
+                "dataset_index": frame_idx,
             },
         }
         return item

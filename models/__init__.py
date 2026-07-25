@@ -5,7 +5,13 @@ from .csi_input_calibration import (
     DynamicAntennaSubcarrierCalibration,
     build_csi_input_calibration,
 )
-from .skeleton import NUM_OPENPOSE_KEYPOINTS, OPENPOSE_BONE_EDGES, build_normalized_adjacency
+from .skeleton import (
+    NUM_OPENPOSE_KEYPOINTS,
+    OPENPOSE_BONE_EDGES,
+    build_decoder_adjacency,
+    build_normalized_adjacency,
+)
+from data.pose_schema import CANONICAL_BONE_EDGES, JOINT_GROUPS, JOINT_NAMES, NUM_KEYPOINTS
 from .wiflow_axial_encoder import AXIAL_ENCODER_MODES, WiFlowAxialEncoder
 from .wiflow_hierarchical_joint_decoder import WiFlowHierarchicalJointDecoder
 from .wiflow_joint_decoder import WiFlowJointDecoder
@@ -37,5 +43,10 @@ __all__ = [
     "csi_feature_input_channels",
     "OPENPOSE_BONE_EDGES",
     "NUM_OPENPOSE_KEYPOINTS",
+    "CANONICAL_BONE_EDGES",
+    "NUM_KEYPOINTS",
+    "JOINT_NAMES",
+    "JOINT_GROUPS",
     "build_normalized_adjacency",
+    "build_decoder_adjacency",
 ]

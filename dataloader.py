@@ -26,6 +26,7 @@ def memmap_collate_fn(batch: list[dict]) -> dict:
         "sample": [item["meta"]["subject"] for item in batch],
         "environment": [item["meta"]["env"] for item in batch],
         "frame_idx": [item["meta"]["frame_idx"] for item in batch],
+        "dataset_index": [item["meta"]["dataset_index"] for item in batch],
     }
 
 

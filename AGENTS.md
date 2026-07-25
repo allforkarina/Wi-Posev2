@@ -6,13 +6,13 @@ Core entry points are `train.py` for source training and cross-domain finetuning
 
 ## Build, Test, and Development Commands
 
-Use the existing environment:
+Use the project virtual environment directly for non-interactive jobs:
 
 ```bash
-conda activate WiFiPose
+.venv/bin/python --version
 ```
 
-Build manifests with `python scripts/data/build_split_manifests.py --dataset-root <memmap-root> --output-dir outputs/manifests`. Run a small training check with `python train.py --mode source_only --dataset-root <memmap-root> --epochs 1 --subset-size 32 --output-dir outputs/sanity`. Evaluate a checkpoint with `python eval.py --dataset-root <memmap-root> --checkpoint outputs/train/best_val_pck_0_2.pth --output-dir outputs/eval`. Export a manifest-aware demo video with `python scripts/media/export_demo_video.py --help`; it requires FFmpeg on `PATH` and a checkpoint whose saved `train_config` matches the requested manifest.
+Build manifests with `.venv/bin/python scripts/data/build_split_manifests.py --dataset-root <memmap-root> --output-dir outputs/manifests`. Run a small training check with `.venv/bin/python train.py --mode source_only --dataset-root <memmap-root> --epochs 1 --subset-size 32 --output-dir outputs/sanity`. Evaluate a checkpoint with `.venv/bin/python eval.py --dataset-root <memmap-root> --checkpoint outputs/train/best_val_mpjpe.pth --output-dir outputs/eval`. Export a manifest-aware demo video with `.venv/bin/python scripts/media/export_demo_video.py --help`; it requires FFmpeg on `PATH` and a checkpoint whose saved `train_config` matches the requested manifest.
 
 ## Coding Style & Naming Conventions
 
@@ -28,4 +28,4 @@ Recent history uses short imperative commits such as `Export report pose compari
 
 ## Security & Agent-Specific Instructions
 
-Pass dataset locations through CLI arguments; never hard-code private server paths. Preserve unrelated user changes. Write repository-facing code and documentation in English and communicate with the user in Chinese unless requested otherwise. Use the `WiFiPose` environment, verify changes before claiming completion, and after project modifications commit and push the active `codex/` branch unless explicitly told not to.
+Pass dataset locations through CLI arguments; never hard-code private server paths. Preserve unrelated user changes. Write repository-facing code and documentation in English and communicate with the user in Chinese unless requested otherwise. Use the project `.venv`, verify changes before claiming completion, and after project modifications commit and push the active `codex/` branch unless explicitly told not to.

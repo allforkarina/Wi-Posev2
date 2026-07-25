@@ -25,6 +25,7 @@ datasets/
 checkpoints/
 runs/
 outputs/
+gt_audit/
 *.pt
 *.pth
 *.ckpt

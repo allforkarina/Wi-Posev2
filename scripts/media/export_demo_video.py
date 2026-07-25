@@ -7,7 +7,7 @@ across a full action sequence.
 
 Usage:
     python scripts/export_demo_video.py \\
-        --checkpoint outputs/train/best_val_pck_0_2.pth \\
+        --checkpoint outputs/train/best_val_mpjpe.pth \\
         --dataset-root data/mmfi_pose \\
         --action A01 \\
         --subject S03 \\

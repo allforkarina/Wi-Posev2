@@ -1,3 +1,5 @@
+"""Run one seed of the delivery experiment suite sequentially."""
+
 from __future__ import annotations
 
 import argparse
@@ -18,18 +20,19 @@ if str(ROOT) not in sys.path:
 from data.split_manifest import load_manifest  # noqa: E402
 from experiments.report_suite import (  # noqa: E402
     ExperimentTask,
+    FULL_MODEL_ID,
     SuiteConfig,
     build_training_tasks,
     is_task_complete,
-    resolve_scale_task,
-    select_trainable_group,
 )
 
 
 REGISTRY_FIELDS = (
     "experiment_id",
+    "local_id",
     "split_mode",
     "phase",
+    "few_shot_key",
     "command",
     "status",
     "started_at",
@@ -37,19 +40,13 @@ REGISTRY_FIELDS = (
     "duration_seconds",
     "checkpoint_path",
     "manifest_hash",
-    "val_pck_0_2",
-    "val_mpjpe",
-    "test_pck_0_2",
-    "test_mpjpe",
-    "val_pck_0_05",
-    "test_pck_0_05",
     "failure",
 )
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run the single-seed Wi-Pose final-report experiment suite.",
+        description="Run one seed of the Wi-Pose delivery experiment suite.",
     )
     parser.add_argument("--dataset-root", required=True, type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
@@ -67,6 +64,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--continue-on-error", action="store_true")
+    parser.add_argument("--skip-visualizations", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -74,24 +72,20 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _registry_row(task: ExperimentTask, status: str = "planned") -> dict[str, Any]:
+def _registry_row(task: ExperimentTask) -> dict[str, Any]:
     return {
         "experiment_id": task.experiment_id,
+        "local_id": task.local_id,
         "split_mode": task.split_mode,
         "phase": task.phase,
+        "few_shot_key": task.few_shot_key or "",
         "command": json.dumps(task.command, ensure_ascii=False),
-        "status": status,
+        "status": "planned",
         "started_at": "",
         "finished_at": "",
         "duration_seconds": "",
         "checkpoint_path": str(task.checkpoint_path),
         "manifest_hash": "",
-        "val_pck_0_2": "",
-        "val_mpjpe": "",
-        "test_pck_0_2": "",
-        "test_mpjpe": "",
-        "val_pck_0_05": "",
-        "test_pck_0_05": "",
         "failure": "",
     }
 
@@ -102,19 +96,8 @@ def _write_registry(path: Path, rows: Mapping[str, Mapping[str, Any]]) -> None:
     with temporary.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=REGISTRY_FIELDS)
         writer.writeheader()
-        for row in rows.values():
-            writer.writerow(row)
+        writer.writerows(rows.values())
     temporary.replace(path)
-
-
-def _read_summary(path: Path) -> dict[str, str]:
-    if not path.is_file():
-        raise FileNotFoundError(f"Evaluation summary not found: {path}")
-    with path.open(newline="", encoding="utf-8") as stream:
-        rows = list(csv.DictReader(stream))
-    if len(rows) != 1:
-        raise ValueError(f"Expected exactly one summary row in {path}, got {len(rows)}")
-    return rows[0]
 
 
 def _run_command(command: Sequence[str]) -> None:
@@ -122,24 +105,6 @@ def _run_command(command: Sequence[str]) -> None:
     result = subprocess.run(list(command), cwd=ROOT, check=False)
     if result.returncode != 0:
         raise RuntimeError(f"Command failed with exit code {result.returncode}")
-
-
-def _run_postprocess(
-    task: ExperimentTask,
-    command: Sequence[str],
-    stage: str,
-    registry_path: Path,
-    registry: dict[str, dict[str, Any]],
-) -> bool:
-    try:
-        _run_command(command)
-        return True
-    except Exception as error:
-        row = registry[task.experiment_id]
-        row["status"] = "failed"
-        row["failure"] = f"{stage}: {type(error).__name__}: {error}"
-        _write_registry(registry_path, registry)
-        return False
 
 
 def _reset_partial_output(task: ExperimentTask, output_root: Path) -> None:
@@ -159,6 +124,7 @@ def _write_completion_marker(task: ExperimentTask, manifest_hash: str) -> None:
         "status": "completed",
         "checkpoint_path": str(task.checkpoint_path),
         "manifest_hash": manifest_hash,
+        "checkpoint_selection": "minimum_validation_mpjpe",
     }, indent=2), encoding="utf-8")
     temporary.replace(marker)
 
@@ -167,20 +133,14 @@ def _execute_training_task(
     task: ExperimentTask,
     manifest_hash: str,
     output_root: Path,
-    registry_path: Path,
-    registry: dict[str, dict[str, Any]],
     resume: bool,
-) -> bool:
-    row = registry[task.experiment_id]
+) -> str:
     if resume and is_task_complete(task, manifest_hash):
-        row["status"] = "skipped_complete"
-        row["manifest_hash"] = manifest_hash
-        _write_registry(registry_path, registry)
-        return True
+        return "skipped_complete"
     if task.output_dir.exists():
         if not resume:
             raise FileExistsError(
-                f"Task output already exists; use --resume to validate/rerun it: {task.output_dir}"
+                f"Task output already exists; use --resume: {task.output_dir}"
             )
         _reset_partial_output(task, output_root)
     task.output_dir.mkdir(parents=True, exist_ok=True)
@@ -188,30 +148,11 @@ def _execute_training_task(
         json.dumps({"command": task.command}, indent=2),
         encoding="utf-8",
     )
-    row.update({
-        "command": json.dumps(task.command, ensure_ascii=False),
-        "status": "running",
-        "started_at": _timestamp(),
-        "manifest_hash": manifest_hash,
-        "failure": "",
-    })
-    _write_registry(registry_path, registry)
-    start = time.perf_counter()
-    try:
-        _run_command(task.command)
-        if not task.checkpoint_path.is_file():
-            raise FileNotFoundError(f"Expected checkpoint not produced: {task.checkpoint_path}")
-        _write_completion_marker(task, manifest_hash)
-        row["status"] = "completed"
-        return True
-    except Exception as error:
-        row["status"] = "failed"
-        row["failure"] = f"{type(error).__name__}: {error}"
-        return False
-    finally:
-        row["finished_at"] = _timestamp()
-        row["duration_seconds"] = f"{time.perf_counter() - start:.3f}"
-        _write_registry(registry_path, registry)
+    _run_command(task.command)
+    if not task.checkpoint_path.is_file():
+        raise FileNotFoundError(f"Expected checkpoint not produced: {task.checkpoint_path}")
+    _write_completion_marker(task, manifest_hash)
+    return "trained"
 
 
 def _evaluation_command(
@@ -219,18 +160,39 @@ def _evaluation_command(
     task: ExperimentTask,
     manifest_key: str,
     output_dir: Path,
+    pose_visualization: bool,
 ) -> tuple[str, ...]:
-    return (
+    command = [
         sys.executable,
         str(ROOT / "eval.py"),
-        "--dataset-root", str(config.dataset_root),
-        "--checkpoint", str(task.checkpoint_path),
-        "--split-manifest", str(task.manifest_path),
-        "--manifest-key", manifest_key,
-        "--output-dir", str(output_dir),
-        "--batch-size", str(config.batch_size),
-        "--device", config.device,
-    )
+        "--dataset-root",
+        str(config.dataset_root),
+        "--checkpoint",
+        str(task.checkpoint_path),
+        "--split-manifest",
+        str(task.manifest_path),
+        "--manifest-key",
+        manifest_key,
+        "--output-dir",
+        str(output_dir),
+        "--batch-size",
+        str(config.batch_size),
+        "--device",
+        config.device,
+    ]
+    if pose_visualization:
+        command.extend([
+            "--pose-viz",
+            "--pose-viz-sampling",
+            "random",
+            "--pose-viz-seed",
+            str(config.seed),
+            "--pose-viz-max-subjects-per-action",
+            "2",
+            "--pose-viz-dpi",
+            "150",
+        ])
+    return tuple(command)
 
 
 def _benchmark_command(
@@ -242,13 +204,48 @@ def _benchmark_command(
     return (
         sys.executable,
         str(ROOT / "scripts" / "evaluation" / "benchmark_wipose.py"),
-        "--dataset-root", str(config.dataset_root),
-        "--checkpoint", str(task.checkpoint_path),
-        "--split-manifest", str(task.manifest_path),
-        "--manifest-key", manifest_key,
-        "--output-dir", str(output_dir),
-        "--batch-size", str(config.batch_size),
-        "--device", config.device,
+        "--dataset-root",
+        str(config.dataset_root),
+        "--checkpoint",
+        str(task.checkpoint_path),
+        "--split-manifest",
+        str(task.manifest_path),
+        "--manifest-key",
+        manifest_key,
+        "--output-dir",
+        str(output_dir),
+        "--batch-size",
+        str(config.batch_size),
+        "--device",
+        config.device,
+    )
+
+
+def _mechanism_command(
+    config: SuiteConfig,
+    task: ExperimentTask,
+    manifest_key: str,
+    output_dir: Path,
+) -> tuple[str, ...]:
+    return (
+        sys.executable,
+        str(ROOT / "scripts" / "evaluation" / "export_mechanism_viz.py"),
+        "--dataset-root",
+        str(config.dataset_root),
+        "--checkpoint",
+        str(task.checkpoint_path),
+        "--split-manifest",
+        str(task.manifest_path),
+        "--manifest-key",
+        manifest_key,
+        "--output-dir",
+        str(output_dir),
+        "--device",
+        config.device,
+        "--seed",
+        str(config.seed),
+        "--dpi",
+        "150",
     )
 
 
@@ -259,171 +256,119 @@ def _ensure_manifests(config: SuiteConfig, tasks: Sequence[ExperimentTask]) -> N
     _run_command((
         sys.executable,
         str(ROOT / "scripts" / "data" / "build_split_manifests.py"),
-        "--dataset-root", str(config.dataset_root),
-        "--output-dir", str(config.output_root / "manifests"),
-        "--seed", str(config.seed),
-        "--block-size", "16",
+        "--dataset-root",
+        str(config.dataset_root),
+        "--output-dir",
+        str(config.output_root / "manifests"),
+        "--seed",
+        str(config.seed),
+        "--block-size",
+        "16",
     ))
 
 
-def _record_summary(
-    registry: dict[str, dict[str, Any]],
-    task: ExperimentTask,
-    summary: Mapping[str, str],
-    prefix: str,
-) -> None:
-    registry[task.experiment_id][f"{prefix}_pck_0_2"] = summary["pck_0_2"]
-    registry[task.experiment_id][f"{prefix}_mpjpe"] = summary["mpjpe"]
-    registry[task.experiment_id][f"{prefix}_pck_0_05"] = summary.get("pck_0_05", "")
-
-
-def _record_source_summary(
-    registry: dict[str, dict[str, Any]],
-    task: ExperimentTask,
-    manifest_key: str,
-    summary: Mapping[str, str],
-) -> None:
-    if manifest_key == "env1_val":
-        _record_summary(registry, task, summary, "val")
-    elif manifest_key == "env1_test":
-        _record_summary(registry, task, summary, "test")
-
-
-def _run_split(
+def _postprocess_task(
     config: SuiteConfig,
-    split_tasks: list[ExperimentTask],
-    registry_path: Path,
-    registry: dict[str, dict[str, Any]],
+    task: ExperimentTask,
+    *,
     resume: bool,
-    continue_on_error: bool,
-) -> bool:
-    manifest = load_manifest(split_tasks[0].manifest_path, config.dataset_root)
-    source_tasks = [task for task in split_tasks if task.phase == "source"]
-    layer_tasks = [task for task in split_tasks if task.phase == "finetune_540"]
-    scale_tasks = [task for task in split_tasks if task.phase == "finetune_scale"]
-
-    for task in source_tasks:
-        succeeded = _execute_training_task(
-            task, manifest.manifest_hash, config.output_root, registry_path, registry, resume
+    skip_visualizations: bool,
+) -> None:
+    for key in task.evaluation_keys:
+        output_dir = task.output_dir / "evaluations" / key
+        visualize = not skip_visualizations and key in task.visualization_keys
+        summary_path = output_dir / "benchmark_summary.csv"
+        pose_dir = output_dir / "pose_viz"
+        evaluation_complete = summary_path.is_file() and (
+            not visualize or pose_dir.is_dir()
         )
-        if not succeeded:
-            if not continue_on_error:
-                return False
-            continue
-        postprocess_ok = True
-        for key in ("env1_val", "env1_test", "env2_val", "env2_test"):
-            evaluation_dir = task.output_dir / "evaluations" / key
-            if not _run_postprocess(
-                task,
-                _evaluation_command(config, task, key, evaluation_dir),
-                f"evaluation:{key}",
-                registry_path,
-                registry,
-            ):
-                postprocess_ok = False
-                break
-            _record_source_summary(
-                registry,
+        if not (resume and evaluation_complete):
+            _run_command(_evaluation_command(
+                config,
                 task,
                 key,
-                _read_summary(evaluation_dir / "benchmark_summary.csv"),
-            )
-            _write_registry(registry_path, registry)
-        if postprocess_ok:
-            postprocess_ok = _run_postprocess(
-                task,
-                _benchmark_command(
-                    config, task, "env1_test", task.output_dir / "benchmark" / "env1_test"
-                ),
-                "benchmark:env1_test",
-                registry_path,
-                registry,
-            )
-        if not postprocess_ok and not continue_on_error:
-            return False
+                output_dir,
+                visualize,
+            ))
+    for key in task.benchmark_keys:
+        output_dir = task.output_dir / "benchmark" / key
+        if resume and (output_dir / "runtime_metrics.csv").is_file():
+            continue
+        _run_command(_benchmark_command(config, task, key, output_dir))
+    if (
+        not skip_visualizations
+        and config.seed == 42
+        and task.local_id in {FULL_MODEL_ID, "FT8100"}
+    ):
+        for key in task.visualization_keys:
+            output_dir = task.output_dir / "mechanisms" / key
+            if resume and (output_dir / "attention_mechanisms.png").is_file():
+                continue
+            _run_command(_mechanism_command(config, task, key, output_dir))
 
-    validation_rows: list[dict[str, str]] = []
-    successful_layer_tasks: list[ExperimentTask] = []
-    for task in layer_tasks:
-        succeeded = _execute_training_task(
-            task, manifest.manifest_hash, config.output_root, registry_path, registry, resume
-        )
-        if not succeeded:
-            if not continue_on_error:
-                return False
-            continue
-        validation_dir = task.output_dir / "evaluations" / "env2_val"
-        if not _run_postprocess(
-            task,
-            _evaluation_command(config, task, "env2_val", validation_dir),
-            "evaluation:env2_val",
-            registry_path,
-            registry,
-        ):
-            if not continue_on_error:
-                return False
-            continue
-        summary = _read_summary(validation_dir / "benchmark_summary.csv")
-        _record_summary(registry, task, summary, "val")
-        validation_rows.append({
-            "experiment_id": task.experiment_id,
-            "trainable_group": str(task.trainable_group),
-            "pck_0_2": summary["pck_0_2"],
-            "mpjpe": summary["mpjpe"],
-        })
-        successful_layer_tasks.append(task)
-        _write_registry(registry_path, registry)
-    if len(validation_rows) != 5:
-        return False
-    selected_group = select_trainable_group(validation_rows)
 
-    resolved_scale_tasks = [resolve_scale_task(task, selected_group) for task in scale_tasks]
-    successful_finetunes = list(successful_layer_tasks)
-    for task in resolved_scale_tasks:
-        registry[task.experiment_id]["command"] = json.dumps(task.command, ensure_ascii=False)
-        succeeded = _execute_training_task(
-            task, manifest.manifest_hash, config.output_root, registry_path, registry, resume
-        )
-        if not succeeded:
-            if not continue_on_error:
-                return False
-            continue
-        successful_finetunes.append(task)
+def _prune_nonselected_checkpoints(task: ExperimentTask) -> None:
+    """Keep only the minimum-validation-MPJPE checkpoint after postprocessing."""
+    for path in task.output_dir.glob("*.pth"):
+        if path.resolve() != task.checkpoint_path.resolve():
+            path.unlink()
 
-    for task in successful_finetunes:
-        test_dir = task.output_dir / "evaluations" / "env2_test"
-        if not _run_postprocess(
-            task,
-            _evaluation_command(config, task, "env2_test", test_dir),
-            "evaluation:env2_test",
-            registry_path,
-            registry,
-        ):
-            if not continue_on_error:
-                return False
-            continue
-        summary = _read_summary(test_dir / "benchmark_summary.csv")
-        _record_summary(registry, task, summary, "test")
-        if not _run_postprocess(
-            task,
-            _benchmark_command(
-                config, task, "env2_test", task.output_dir / "benchmark" / "env2_test"
-            ),
-            "benchmark:env2_test",
-            registry_path,
-            registry,
-        ) and not continue_on_error:
-            return False
-        _write_registry(registry_path, registry)
-    return True
+
+def _read_one_csv(path: Path) -> dict[str, str]:
+    with path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    if len(rows) != 1:
+        raise ValueError(f"Expected one row in {path}, got {len(rows)}")
+    return rows[0]
+
+
+def _write_evaluation_index(
+    path: Path,
+    tasks: Sequence[ExperimentTask],
+    seed: int,
+) -> None:
+    rows: list[dict[str, str | int]] = []
+    metric_names: set[str] = set()
+    for task in tasks:
+        for key in task.evaluation_keys:
+            summary_path = task.output_dir / "evaluations" / key / "benchmark_summary.csv"
+            if not summary_path.is_file():
+                continue
+            metrics = _read_one_csv(summary_path)
+            metric_names.update(metrics)
+            rows.append({
+                "seed": seed,
+                "experiment_id": task.experiment_id,
+                "local_id": task.local_id,
+                "split_mode": task.split_mode,
+                "phase": task.phase,
+                "manifest_key": key,
+                **metrics,
+            })
+    if not rows:
+        return
+    leading = (
+        "seed",
+        "experiment_id",
+        "local_id",
+        "split_mode",
+        "phase",
+        "manifest_key",
+    )
+    fields = [*leading, *sorted(metric_names)]
+    temporary = path.with_suffix(".tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    temporary.replace(path)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     requested_modes = set(args.split_modes)
     ordered_modes = tuple(
-        mode
-        for mode in ("random_frame", "temporal_block")
+        mode for mode in ("random_frame", "temporal_block")
         if mode in requested_modes
     )
     config = SuiteConfig(
@@ -439,26 +384,67 @@ def main(argv: Sequence[str] | None = None) -> int:
     tasks = build_training_tasks(config)
     registry_path = config.output_root / "experiment_registry.csv"
     registry = {task.experiment_id: _registry_row(task) for task in tasks}
+    _write_registry(registry_path, registry)
     if args.dry_run:
-        _write_registry(registry_path, registry)
         for task in tasks:
             print(f"{task.experiment_id}: {subprocess.list2cmdline(list(task.command))}")
         return 0
 
     _ensure_manifests(config, tasks)
-    for split_mode in config.split_modes:
-        split_tasks = [task for task in tasks if task.split_mode == split_mode]
-        succeeded = _run_split(
-            config,
-            split_tasks,
-            registry_path,
-            registry,
-            resume=args.resume,
-            continue_on_error=args.continue_on_error,
-        )
-        if not succeeded and not args.continue_on_error:
-            return 1
-    return 0 if all(row["status"] != "failed" for row in registry.values()) else 1
+    for task in tasks:
+        row = registry[task.experiment_id]
+        manifest = load_manifest(task.manifest_path, config.dataset_root)
+        row["manifest_hash"] = manifest.manifest_hash
+        row["started_at"] = _timestamp()
+        row["status"] = "running"
+        row["failure"] = ""
+        _write_registry(registry_path, registry)
+        started = time.perf_counter()
+        try:
+            training_status = _execute_training_task(
+                task,
+                manifest.manifest_hash,
+                config.output_root,
+                args.resume,
+            )
+            _postprocess_task(
+                config,
+                task,
+                resume=args.resume,
+                skip_visualizations=args.skip_visualizations,
+            )
+            _prune_nonselected_checkpoints(task)
+            row["status"] = (
+                "completed_from_checkpoint"
+                if training_status == "skipped_complete" else "completed"
+            )
+        except KeyboardInterrupt:
+            row["status"] = "interrupted"
+            row["failure"] = "KeyboardInterrupt"
+            raise
+        except Exception as error:
+            row["status"] = "failed"
+            row["failure"] = f"{type(error).__name__}: {error}"
+            if not args.continue_on_error:
+                row["finished_at"] = _timestamp()
+                row["duration_seconds"] = f"{time.perf_counter() - started:.3f}"
+                _write_registry(registry_path, registry)
+                _write_evaluation_index(
+                    config.output_root / "evaluation_index.csv",
+                    tasks,
+                    config.seed,
+                )
+                return 1
+        finally:
+            row["finished_at"] = _timestamp()
+            row["duration_seconds"] = f"{time.perf_counter() - started:.3f}"
+            _write_registry(registry_path, registry)
+            _write_evaluation_index(
+                config.output_root / "evaluation_index.csv",
+                tasks,
+                config.seed,
+            )
+    return 0 if all(row["status"].startswith("completed") for row in registry.values()) else 1
 
 
 if __name__ == "__main__":

@@ -47,7 +47,7 @@ def test_audit_reports_alignment_and_writes_json(tmp_path: Path) -> None:
 
     assert summary["alignment_status_counts"] == {"aligned": 1}
     assert summary["raw_joint_exact_zero_pair_counts"]["0"] == 1
-    assert summary["current_mapping"]["verified"] is False
+    assert summary["current_mapping"]["verified"] is True
     assert summary["confirmed_canonical_18_edges"] == [list(edge) for edge in CANONICAL_18_EDGES]
     saved = json.loads((output_dir / "audit_summary.json").read_text(encoding="utf-8"))
     assert saved["total_gt_frames"] == 3

@@ -12,11 +12,19 @@ from .wiflow_mlp_decoder import WiFlowMLPDecoder
 from .wiflow_spatial_encoder import WiFlowSpatialEncoder
 from .wrist_refiner import WristRefinementHead
 
-DECODER_TYPES = ("mlp", "joint", "hierarchical")
+DECODER_TYPES = (
+    "mlp",
+    "joint_cross_attention",
+    "joint_self_attention",
+    "joint",
+    "joint_shuffled_graph",
+    "joint_identity_graph",
+    "hierarchical",
+)
 
 
 class WiFlowModel(nn.Module):
-    """End-to-end WiFlow model that maps CSI features to OpenPose18 coordinates."""
+    """Map CSI amplitude to the project's custom 18-joint coordinates."""
 
     def __init__(
         self,
@@ -56,8 +64,22 @@ class WiFlowModel(nn.Module):
         self.axial_encoder = WiFlowAxialEncoder(mode=axial_mode)
         if decoder_type == "mlp":
             self.decoder = WiFlowMLPDecoder()
+        elif decoder_type == "joint_cross_attention":
+            self.decoder = WiFlowJointDecoder(
+                use_graph=False,
+                use_joint_attention=False,
+            )
+        elif decoder_type == "joint_self_attention":
+            self.decoder = WiFlowJointDecoder(
+                use_graph=False,
+                use_joint_attention=True,
+            )
         elif decoder_type == "joint":
             self.decoder = WiFlowJointDecoder()
+        elif decoder_type == "joint_shuffled_graph":
+            self.decoder = WiFlowJointDecoder(adjacency_variant="shuffled")
+        elif decoder_type == "joint_identity_graph":
+            self.decoder = WiFlowJointDecoder(adjacency_variant="identity")
         elif decoder_type == "hierarchical":
             self.decoder = WiFlowHierarchicalJointDecoder()
         if wrist_refinement:

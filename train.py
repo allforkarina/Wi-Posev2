@@ -23,23 +23,22 @@ from dataloader import (
     create_memmap_data_loaders,
     memmap_collate_fn,
 )
+from data.pose_schema import JOINT_GROUPS, TORSO_DIAGONALS
 from data.split_manifest import SplitManifest, load_manifest
 from models import (
     AXIAL_ENCODER_MODES,
     CSI_FEATURE_MODES,
     CSI_INPUT_CALIBRATION_TYPES,
     DECODER_TYPES,
-    OPENPOSE_BONE_EDGES,
+    CANONICAL_BONE_EDGES,
     SPATIAL_STEM_TYPES,
     WiFlowModel,
 )
 
 
 PCK_THRESHOLDS: tuple[float, ...] = (0.05, 0.1, 0.2, 0.3, 0.4, 0.5)
-RIGHT_SHOULDER_INDEX = 2
-LEFT_HIP_INDEX = 11
-DISTAL_SUPERVISION_JOINTS: tuple[int, ...] = (4, 7, 9, 10, 12, 13)
-WRIST_DIRECTION_EDGES: tuple[tuple[int, int], ...] = ((8, 10), (12, 13))
+DISTAL_SUPERVISION_JOINTS = JOINT_GROUPS["distal"]
+WRIST_DIRECTION_EDGES: tuple[tuple[int, int], ...] = ((13, 10), (8, 12))
 TRAINABLE_GROUPS: tuple[str, ...] = (
     "encoder",
     "decoder",
@@ -161,7 +160,7 @@ def prepare_model_input(
 def bone_length_loss(
     prediction: torch.Tensor,
     target: torch.Tensor,
-    edges: tuple[tuple[int, int], ...] = OPENPOSE_BONE_EDGES,
+    edges: tuple[tuple[int, int], ...] = CANONICAL_BONE_EDGES,
 ) -> torch.Tensor:
     edge_index = torch.as_tensor(edges, dtype=torch.long, device=prediction.device)
     pred_lengths = torch.linalg.vector_norm(
@@ -358,10 +357,16 @@ def compute_losses(
 
 
 def compute_torso_scale(target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    return torch.linalg.vector_norm(
-        target[:, RIGHT_SHOULDER_INDEX] - target[:, LEFT_HIP_INDEX],
+    diagonal_index = torch.as_tensor(
+        TORSO_DIAGONALS,
+        dtype=torch.long,
+        device=target.device,
+    )
+    diagonals = torch.linalg.vector_norm(
+        target[:, diagonal_index[:, 0]] - target[:, diagonal_index[:, 1]],
         dim=-1,
-    ).clamp_min(eps)
+    )
+    return diagonals.mean(dim=-1).clamp_min(eps)
 
 
 def mpjpe(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -855,7 +860,6 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
         )
 
     best_val_mpjpe = float("inf")
-    best_val_pck_0_2 = -float("inf")
     log_path = output_dir / "train_log.csv"
     for epoch in range(1, config.epochs + 1):
         start_time = time.perf_counter()
@@ -927,18 +931,6 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
                 best_metric=best_val_mpjpe,
                 config=config,
             )
-        if val_metrics["pck_0_2"] > best_val_pck_0_2:
-            best_val_pck_0_2 = val_metrics["pck_0_2"]
-            save_checkpoint(
-                output_dir / "best_val_pck_0_2.pth",
-                model,
-                optimizer,
-                scheduler,
-                epoch,
-                best_metric=best_val_pck_0_2,
-                config=config,
-            )
-
         print(
             f"epoch={epoch:03d} "
             f"train_loss={train_metrics['loss']:.6f} "
@@ -1100,9 +1092,7 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         f"input={tuple(model_input.shape)}, output={tuple(keypoint_output.shape)}, label={tuple(target.shape)}"
     )
 
-    best_train_loss = float("inf")
     best_val_mpjpe = float("inf")
-    best_val_pck_0_2 = -float("inf")
     log_path = output_dir / "train_log.csv"
     for epoch in range(1, config.epochs + 1):
         start_time = time.perf_counter()
@@ -1156,25 +1146,11 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         append_epoch_metric_csvs(output_dir, epoch, train_metrics, val_metrics)
 
         save_checkpoint(
-            output_dir / f"epoch_{epoch:03d}.pth",
-            model, optimizer, scheduler, epoch,
-            best_metric=train_metrics["loss"],
-            config=config,
-        )
-        save_checkpoint(
             output_dir / "last.pth",
             model, optimizer, scheduler, epoch,
             best_metric=val_metrics["mpjpe"],
             config=config,
         )
-        if train_metrics["loss"] < best_train_loss:
-            best_train_loss = train_metrics["loss"]
-            save_checkpoint(
-                output_dir / "best_train_loss.pth",
-                model, optimizer, scheduler, epoch,
-                best_metric=best_train_loss,
-                config=config,
-            )
         if val_metrics["mpjpe"] < best_val_mpjpe:
             best_val_mpjpe = val_metrics["mpjpe"]
             save_checkpoint(
@@ -1183,15 +1159,6 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
                 best_metric=best_val_mpjpe,
                 config=config,
             )
-        if val_metrics["pck_0_2"] > best_val_pck_0_2:
-            best_val_pck_0_2 = val_metrics["pck_0_2"]
-            save_checkpoint(
-                output_dir / "best_val_pck_0_2.pth",
-                model, optimizer, scheduler, epoch,
-                best_metric=best_val_pck_0_2,
-                config=config,
-            )
-
         print(
             f"epoch={epoch:03d} "
             f"train_loss={train_metrics['loss']:.6f} "

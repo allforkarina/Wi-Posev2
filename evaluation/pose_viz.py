@@ -19,6 +19,7 @@ from matplotlib.lines import Line2D
 from torch.utils.data import DataLoader, Subset
 
 from data.memmap_dataset import MemmapDataset
+from data.pose_schema import CANONICAL_BONE_EDGES
 from dataloader import memmap_collate_fn
 from train import extract_prediction_keypoints, prepare_model_input
 
@@ -34,14 +35,7 @@ JOINT_COLORS = [
     "#9A6324", "#FFFAC8", "#800000", "#AAFFC3", "#808000", "#FFD8B1",
 ]
 
-BONE_EDGES: list[tuple[int, int]] = [
-    (4, 7), (7, 3),
-    (3, 9), (3, 6), (3, 11),
-    (9, 13), (13, 10), (11, 8), (8, 12),
-    (6, 0),
-    (0, 15), (0, 16),
-    (15, 14), (14, 17), (16, 5), (5, 1), (1, 2),
-]
+BONE_EDGES = CANONICAL_BONE_EDGES
 
 plt.rcParams.update({
     "font.family": FONT_FAMILY,
@@ -63,13 +57,18 @@ plt.rcParams.update({
 MIDDLE_FRAME_OFFSET = 148  # 297 // 2
 
 
-def _collect_middle_frames(dataset: MemmapDataset) -> list[int]:
-    """Return dataset positions of the middle frame for each (action, subject).
-
-    Groups all positions in *dataset* by (action, subject), sorts each group,
-    and selects the 148th position (0-indexed). Returns a sorted list of
-    positions suitable for ``Subset(dataset, result)``.
-    """
+def _collect_representative_frames(
+    dataset: MemmapDataset,
+    *,
+    sampling: str,
+    seed: int,
+    max_subjects_per_action: int,
+) -> list[int]:
+    """Return bounded representative positions for each action."""
+    if sampling not in {"random", "middle"}:
+        raise ValueError("sampling must be random or middle")
+    if max_subjects_per_action < 1:
+        raise ValueError("max_subjects_per_action must be at least 1")
     groups: dict[tuple[str, str], list[int]] = defaultdict(list)
     for pos in range(len(dataset)):
         abs_idx = int(dataset.indices[pos])
@@ -77,15 +76,29 @@ def _collect_middle_frames(dataset: MemmapDataset) -> list[int]:
         subject = str(dataset._samples[abs_idx])
         groups[(action, subject)].append(pos)
 
-    selected: list[int] = []
+    generator = np.random.default_rng(seed)
+    candidates: dict[str, list[tuple[str, int]]] = defaultdict(list)
     for (action, subject), positions in sorted(groups.items()):
         positions.sort()
-        if len(positions) <= MIDDLE_FRAME_OFFSET:
-            print(f"  [WARN] ({action}, {subject}) has only {len(positions)} "
-                  f"frames, expected > {MIDDLE_FRAME_OFFSET} — skipping")
-            continue
-        selected.append(positions[MIDDLE_FRAME_OFFSET])
+        if sampling == "random":
+            position = positions[int(generator.integers(0, len(positions)))]
+        else:
+            position = positions[len(positions) // 2]
+        candidates[action].append((subject, position))
 
+    selected: list[int] = []
+    for action in sorted(candidates):
+        subject_positions = candidates[action]
+        if len(subject_positions) > max_subjects_per_action:
+            chosen = np.sort(
+                generator.choice(
+                    len(subject_positions),
+                    size=max_subjects_per_action,
+                    replace=False,
+                )
+            )
+            subject_positions = [subject_positions[int(index)] for index in chosen]
+        selected.extend(position for _, position in subject_positions)
     return sorted(selected)
 
 
@@ -216,6 +229,7 @@ def save_pose_comparison(
     figure_height: float | None = None,
     dataset_index: int | None = None,
     model_label: str | None = None,
+    dpi: int = 150,
 ) -> Path:
     """Save a two-subplot figure: scatter (left) + skeleton (right)."""
     if target.shape != (18, 2) or prediction.shape != (18, 2):
@@ -277,7 +291,7 @@ def save_pose_comparison(
     safe_env = environment.replace("/", "_").replace("\\", "_")
     index_suffix = f"_idx{dataset_index}" if dataset_index is not None else ""
     output_path = action_dir / f"{safe_subject}_{safe_env}{index_suffix}.png"
-    fig.savefig(str(output_path), dpi=300)
+    fig.savefig(str(output_path), dpi=dpi)
     plt.close(fig)
     return output_path
 
@@ -286,6 +300,7 @@ def _build_action_composite(
     action: str,
     samples: list[dict],
     output_dir: Path,
+    dpi: int,
 ) -> None:
     """Build an N×M grid of skeleton overlays for all samples of *action*."""
     n = len(samples)
@@ -351,7 +366,7 @@ def _build_action_composite(
 
     action_dir = output_dir / action
     action_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(action_dir / "_composite.png"), dpi=300)
+    fig.savefig(str(action_dir / "_composite.png"), dpi=dpi)
     plt.close(fig)
 
 
@@ -369,6 +384,11 @@ def run_pose_visualization(
     figure_height: float | None = None,
     batch_size: int = 64,
     num_workers: int = 0,
+    sampling: str = "random",
+    seed: int = 42,
+    max_subjects_per_action: int = 2,
+    composite_only: bool = True,
+    dpi: int = 150,
 ) -> None:
     """Orchestrate pose joint scatter + skeleton visualization.
 
@@ -389,9 +409,13 @@ def run_pose_visualization(
     viz_dir = output_dir / "pose_viz"
     viz_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- collect middle frames ---
-    print("  Collecting middle frames per (action, subject)...")
-    frame_positions = _collect_middle_frames(dataset)
+    print(f"  Collecting {sampling} representative frames...")
+    frame_positions = _collect_representative_frames(
+        dataset,
+        sampling=sampling,
+        seed=seed,
+        max_subjects_per_action=max_subjects_per_action,
+    )
     print(f"  Selected {len(frame_positions)} frames for visualization")
 
     if not frame_positions:
@@ -424,16 +448,18 @@ def run_pose_visualization(
                 subject = str(batch["sample"][i])
                 environment = str(batch["environment"][i])
 
-                save_pose_comparison(
-                    target=targets_np[i],
-                    prediction=preds[i],
-                    action=action,
-                    subject=subject,
-                    environment=environment,
-                    output_dir=viz_dir,
-                    figure_width=figure_width,
-                    figure_height=figure_height,
-                )
+                if not composite_only:
+                    save_pose_comparison(
+                        target=targets_np[i],
+                        prediction=preds[i],
+                        action=action,
+                        subject=subject,
+                        environment=environment,
+                        output_dir=viz_dir,
+                        figure_width=figure_width,
+                        figure_height=figure_height,
+                        dpi=dpi,
+                    )
                 action_samples[action].append({
                     "target": targets_np[i],
                     "prediction": preds[i],
@@ -445,7 +471,8 @@ def run_pose_visualization(
     # --- per-action composites ---
     print(f"  Building per-action composite figures ({len(action_samples)} actions)...")
     for action in sorted(action_samples):
-        _build_action_composite(action, action_samples[action], viz_dir)
+        _build_action_composite(action, action_samples[action], viz_dir, dpi)
 
-    print(f"  Saved {sample_idx} individual figures + "
+    individual_count = 0 if composite_only else sample_idx
+    print(f"  Saved {individual_count} individual figures + "
           f"{len(action_samples)} composites to {viz_dir}")

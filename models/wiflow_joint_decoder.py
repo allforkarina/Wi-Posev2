@@ -3,7 +3,9 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from .skeleton import NUM_OPENPOSE_KEYPOINTS, build_normalized_adjacency
+from data.pose_schema import NUM_KEYPOINTS
+
+from .skeleton import build_decoder_adjacency
 
 
 class WiFlowJointCrossAttentionLayer(nn.Module):
@@ -40,16 +42,26 @@ class WiFlowJointCrossAttentionLayer(nn.Module):
 
 
 class WiFlowJointDecoder(nn.Module):
-    """Decode OpenPose18 coordinates from [B, 256, 29, 16] feature maps."""
+    """Decode project-specific 18-joint coordinates from CSI feature maps."""
 
-    def __init__(self, num_layers: int = 3) -> None:
+    def __init__(
+        self,
+        num_layers: int = 3,
+        *,
+        use_graph: bool = True,
+        use_joint_attention: bool = True,
+        adjacency_variant: str = "canonical",
+    ) -> None:
         super().__init__()
         if num_layers < 1:
             raise ValueError("num_layers must be at least 1")
-        self.num_queries = NUM_OPENPOSE_KEYPOINTS
+        self.num_queries = NUM_KEYPOINTS
         self.embedding_dim = 256
         self.num_layers = num_layers
         self.num_heads = 4
+        self.use_graph = use_graph
+        self.use_joint_attention = use_joint_attention
+        self.adjacency_variant = adjacency_variant
         self.joint_queries = nn.Parameter(torch.zeros(self.num_queries, self.embedding_dim))
         self.cross_attention_layers = nn.ModuleList(
             WiFlowJointCrossAttentionLayer(embedding_dim=self.embedding_dim)
@@ -70,7 +82,11 @@ class WiFlowJointDecoder(nn.Module):
             nn.SiLU(),
             nn.Linear(128, 2),
         )
-        self.register_buffer("adjacency", build_normalized_adjacency(), persistent=False)
+        self.register_buffer(
+            "adjacency",
+            build_decoder_adjacency(adjacency_variant),
+            persistent=False,
+        )
 
     def flatten_tokens(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 4:
@@ -87,12 +103,14 @@ class WiFlowJointDecoder(nn.Module):
         for layer in self.cross_attention_layers:
             h = layer(h, tokens)
 
-        gnn_output = torch.matmul(self.adjacency, self.gnn_projection(h))
-        gnn_output = self.gnn_activation(gnn_output)
-        h = self.gnn_norm(h + gnn_output)
+        if self.use_graph:
+            gnn_output = torch.matmul(self.adjacency, self.gnn_projection(h))
+            gnn_output = self.gnn_activation(gnn_output)
+            h = self.gnn_norm(h + gnn_output)
 
-        attention_output, _ = self.joint_attention(h, h, h, need_weights=False)
-        h = self.attention_norm(h + attention_output)
+        if self.use_joint_attention:
+            attention_output, _ = self.joint_attention(h, h, h, need_weights=False)
+            h = self.attention_norm(h + attention_output)
         coordinates = self.coordinate_head(h)
         if return_features:
             return coordinates, h
