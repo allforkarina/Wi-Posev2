@@ -549,7 +549,20 @@ def _compute_diagnostics(
     # per-joint variance over sample axis, averaged over x/y
     pred_var = preds.var(axis=0).mean(axis=1)   # [18]
     gt_var = targets.var(axis=0).mean(axis=1)    # [18]
-    var_ratio = np.where(gt_var > 1e-8, pred_var / gt_var, 0.0)
+    var_ratio = np.divide(
+        pred_var,
+        gt_var,
+        out=np.zeros_like(pred_var),
+        where=gt_var > 1e-8,
+    )
+    pred_std = np.sqrt(pred_var)
+    gt_std = np.sqrt(gt_var)
+    std_ratio = np.divide(
+        pred_std,
+        gt_std,
+        out=np.zeros_like(pred_std),
+        where=gt_std > 1e-8,
+    )
 
     # L2 distance between per-joint means
     pred_mean = preds.mean(axis=0)   # [18, 2]
@@ -559,6 +572,13 @@ def _compute_diagnostics(
     joint_rows = [
         {
             "joint_index": j,
+            "joint_name": JOINT_NAMES[j],
+            "joint_groups": " ".join(
+                name for name, indices in JOINT_GROUPS.items() if j in indices
+            ),
+            "pred_std": float(pred_std[j]),
+            "gt_std": float(gt_std[j]),
+            "std_ratio": float(std_ratio[j]),
             "pred_var": float(pred_var[j]),
             "gt_var": float(gt_var[j]),
             "var_ratio": float(var_ratio[j]),
@@ -571,6 +591,9 @@ def _compute_diagnostics(
         "overall_pred_var": float(pred_var.mean()),
         "overall_gt_var": float(gt_var.mean()),
         "overall_var_ratio": float(var_ratio.mean()),
+        "overall_pred_std": float(pred_std.mean()),
+        "overall_gt_std": float(gt_std.mean()),
+        "overall_std_ratio": float(std_ratio.mean()),
         "overall_mean_pose_dist": float(mean_pose_dist.mean()),
     }
 
@@ -600,6 +623,7 @@ def write_evaluation_outputs(output_dir: str | Path, result: Mapping[str, Any]) 
         "sample_count": int(result["sample_count"]),
         **result["overall"],
         "overall_var_ratio": float(diagnostic_overall["overall_var_ratio"]),
+        "overall_std_ratio": float(diagnostic_overall["overall_std_ratio"]),
         "overall_mean_pose_dist": float(diagnostic_overall["overall_mean_pose_dist"]),
     }
     _write_csv(output_dir / "benchmark_summary.csv", [summary])

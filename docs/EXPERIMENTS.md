@@ -53,6 +53,23 @@ The combination baseline C0 removes both innovations (`none` axial mode plus
 MLP decoder). C1, C2, and C3 reuse JD0, AX0, and the full model respectively,
 so no identical architecture is retrained under a second name.
 
+## Optional follow-on diagnostics
+
+These controls are retained for later diagnosis but are not part of the
+default 54-run delivery matrix.
+
+| ID | Hypothesis | Matched comparison | Primary evidence |
+| --- | --- | --- | --- |
+| D4 | Aligning source/target axial-feature covariance can reduce CSI environment shift without erasing pose structure. | `finetune_align --align-loss none --align-weight 0` versus `finetune_align --align-loss coral --align-weight <w>` with identical source checkpoint, manifest, few-shot indices, seed, schedule, losses, and trainable groups. | Target/source MPJPE, PCK, forgetting, per-action errors, feature distributions, and collapse diagnostics. |
+| L1 | Uniform coordinate averaging may under-supervise the custom-schema hip, knee, and ankle joints. | `--joint-loss-preset uniform` versus `--joint-loss-preset lower_limb --lower-limb-weight <w>` with every other setting fixed. | Overall and lower-limb MPJPE/PCK, bone errors, and per-joint standard-deviation ratio. |
+
+`finetune_align` uses supervised source replay with weight 1.0, supervised
+few-shot target loss, and the optional CORAL term. It uses the same validation
+loader and minimum-validation-MPJPE checkpoint rule as ordinary finetuning.
+The lower-limb preset uses custom indices `16,5,2,15,14,17`; it does not use
+OpenPose or COCO ordering. Both extensions default to a neutral setting, so
+existing delivery commands and checkpoint reconstruction remain unchanged.
+
 ## Metrics
 
 No pixel-space or original-image-size metric is used. Coordinates remain in

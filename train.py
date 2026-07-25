@@ -38,7 +38,11 @@ from models import (
 
 PCK_THRESHOLDS: tuple[float, ...] = (0.05, 0.1, 0.2, 0.3, 0.4, 0.5)
 DISTAL_SUPERVISION_JOINTS = JOINT_GROUPS["distal"]
+LOWER_LIMB_JOINTS = JOINT_GROUPS["lower_limb"]
 WRIST_DIRECTION_EDGES: tuple[tuple[int, int], ...] = ((13, 10), (8, 12))
+ALIGN_LOSSES: tuple[str, ...] = ("none", "coral")
+ALIGN_LAYERS: tuple[str, ...] = ("axial",)
+JOINT_LOSS_PRESETS: tuple[str, ...] = ("uniform", "lower_limb")
 TRAINABLE_GROUPS: tuple[str, ...] = (
     "encoder",
     "decoder",
@@ -111,6 +115,11 @@ class TrainConfig:
     source_test_key: str | None = None
     split_mode: str | None = None
     manifest_hash: str | None = None
+    align_loss: str = "none"
+    align_layer: str = "axial"
+    align_weight: float = 0.0
+    joint_loss_preset: str = "uniform"
+    lower_limb_weight: float = 1.0
 
 
 def resolve_source_manifest_keys(config: TrainConfig) -> dict[str, str]:
@@ -132,7 +141,7 @@ def prepare_training_config(
     if not config.split_manifest:
         return config, None
     manifest = load_manifest(config.split_manifest, config.dataset_root)
-    if config.mode == "finetune":
+    if config.mode in ("finetune", "finetune_align"):
         if not config.few_shot_key:
             raise ValueError("Manifest-backed finetuning requires --few-shot-key")
         manifest.indices(config.few_shot_key)
@@ -332,8 +341,15 @@ def compute_losses(
     latent_structure_loss_weight: float = 0.0,
     encoder_features: torch.Tensor | None = None,
     encoder_relation_loss_weight: float = 0.0,
+    joint_loss_preset: str = "uniform",
+    lower_limb_weight: float = 1.0,
 ) -> Dict[str, torch.Tensor]:
-    coord = F.l1_loss(prediction, target)
+    coord = weighted_coordinate_loss(
+        prediction,
+        target,
+        joint_loss_preset=joint_loss_preset,
+        lower_limb_weight=lower_limb_weight,
+    )
     bone = bone_length_loss(prediction, target)
     total = coord + bone_loss_weight * bone
     losses = {
@@ -354,6 +370,96 @@ def compute_losses(
         losses["encoder_relation_loss"] = encoder_relation
         losses["loss"] = losses["loss"] + encoder_relation_loss_weight * encoder_relation
     return losses
+
+
+def _joint_loss_weights(
+    num_joints: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    joint_loss_preset: str,
+    lower_limb_weight: float,
+) -> torch.Tensor:
+    if joint_loss_preset not in JOINT_LOSS_PRESETS:
+        raise ValueError(
+            f"Unknown joint_loss_preset: {joint_loss_preset}. "
+            f"Valid options: {JOINT_LOSS_PRESETS}"
+        )
+    if lower_limb_weight <= 0.0:
+        raise ValueError("lower_limb_weight must be positive")
+
+    weights = torch.ones(num_joints, device=device, dtype=dtype)
+    if joint_loss_preset == "lower_limb":
+        lower_limb_index = torch.as_tensor(
+            [index for index in LOWER_LIMB_JOINTS if index < num_joints],
+            dtype=torch.long,
+            device=device,
+        )
+        weights[lower_limb_index] = lower_limb_weight
+    return weights
+
+
+def weighted_coordinate_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    joint_loss_preset: str = "uniform",
+    lower_limb_weight: float = 1.0,
+) -> torch.Tensor:
+    if prediction.shape != target.shape:
+        raise ValueError(
+            f"prediction shape {tuple(prediction.shape)} must match "
+            f"target shape {tuple(target.shape)}"
+        )
+    if prediction.ndim != 3 or prediction.shape[-1] != 2:
+        raise ValueError("weighted_coordinate_loss expects [B, J, 2] tensors")
+
+    per_joint = torch.abs(prediction - target).mean(dim=-1)
+    weights = _joint_loss_weights(
+        num_joints=prediction.shape[1],
+        device=prediction.device,
+        dtype=prediction.dtype,
+        joint_loss_preset=joint_loss_preset,
+        lower_limb_weight=lower_limb_weight,
+    )
+    return (per_joint * weights).sum(dim=-1).div(weights.sum()).mean()
+
+
+def _flatten_alignment_feature(feature: torch.Tensor) -> torch.Tensor:
+    if feature.ndim < 2:
+        raise ValueError("Alignment feature must include batch and feature dimensions")
+    if feature.ndim == 2:
+        return feature
+    return feature.mean(dim=tuple(range(2, feature.ndim)))
+
+
+def coral_loss(
+    source_feature: torch.Tensor,
+    target_feature: torch.Tensor,
+) -> torch.Tensor:
+    source = _flatten_alignment_feature(source_feature)
+    target = _flatten_alignment_feature(target_feature)
+    if source.shape[0] < 2 or target.shape[0] < 2:
+        return source.sum() * 0.0
+
+    source = source - source.mean(dim=0, keepdim=True)
+    target = target - target.mean(dim=0, keepdim=True)
+    source_covariance = source.T.matmul(source) / (source.shape[0] - 1)
+    target_covariance = target.T.matmul(target) / (target.shape[0] - 1)
+    feature_dim = source.shape[1]
+    return (
+        source_covariance - target_covariance
+    ).pow(2).sum() / (4.0 * feature_dim * feature_dim)
+
+
+def compute_alignment_loss(
+    source_feature: torch.Tensor,
+    target_feature: torch.Tensor,
+    align_loss: str,
+) -> torch.Tensor:
+    if align_loss == "none":
+        return source_feature.sum() * 0.0
+    if align_loss == "coral":
+        return coral_loss(source_feature, target_feature)
+    raise ValueError(f"Unknown align_loss: {align_loss}. Valid options: {ALIGN_LOSSES}")
 
 
 def compute_torso_scale(target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -436,6 +542,8 @@ def run_epoch(
                 latent_structure_loss_weight=criterion_config.latent_structure_loss_weight,
                 encoder_features=encoder_features,
                 encoder_relation_loss_weight=criterion_config.encoder_relation_loss_weight,
+                joint_loss_preset=criterion_config.joint_loss_preset,
+                lower_limb_weight=criterion_config.lower_limb_weight,
             )
             keypoint_prediction = extract_prediction_keypoints(prediction)
             metrics = compute_metrics(keypoint_prediction.detach(), target)
@@ -472,12 +580,20 @@ def run_finetune_epoch(
     totals: Dict[str, float] = {}
     sample_count = 0
     source_iter = iter(source_loader) if source_loader is not None else None
+    source_loss_weight = (
+        1.0 if criterion_config.mode == "finetune_align"
+        else criterion_config.source_replay_weight
+    )
+    needs_source_batch = source_loss_weight > 0.0 or criterion_config.align_weight > 0.0
 
     for batch in loader:
         model_input, target = prepare_model_input(batch, device)
         optimizer.zero_grad(set_to_none=True)
         encoder_features = None
-        if criterion_config.encoder_relation_loss_weight > 0.0:
+        if (
+            criterion_config.encoder_relation_loss_weight > 0.0
+            or criterion_config.align_weight > 0.0
+        ):
             encoder_features = model.encode_features(model_input)
             output = model.decode_features(
                 encoder_features,
@@ -497,6 +613,8 @@ def run_finetune_epoch(
             latent_structure_loss_weight=criterion_config.latent_structure_loss_weight,
             encoder_features=encoder_features,
             encoder_relation_loss_weight=criterion_config.encoder_relation_loss_weight,
+            joint_loss_preset=criterion_config.joint_loss_preset,
+            lower_limb_weight=criterion_config.lower_limb_weight,
         )
         if criterion_config.distal_loss_weight > 0.0:
             distal = distal_joint_loss(prediction, target)
@@ -513,28 +631,45 @@ def run_finetune_epoch(
         target_loss = losses["loss"]
         total_loss = target_loss
         source_loss = None
-        if criterion_config.source_replay_weight > 0.0:
+        align = None
+        if needs_source_batch:
             if source_iter is None or source_loader is None:
-                raise ValueError("source_loader is required when source_replay_weight > 0")
+                raise ValueError(
+                    "source_loader is required for source replay or domain alignment"
+                )
             try:
                 source_batch = next(source_iter)
             except StopIteration:
                 source_iter = iter(source_loader)
                 source_batch = next(source_iter)
             source_input, source_target = prepare_model_input(source_batch, device)
-            source_output = model(source_input)
+            source_features = model.encode_features(source_input)
+            source_output = model.decode_features(source_features)
             source_prediction = extract_prediction_keypoints(source_output)
             source_losses = compute_losses(
                 source_prediction,
                 source_target,
                 bone_loss_weight=criterion_config.bone_loss_weight,
+                joint_loss_preset=criterion_config.joint_loss_preset,
+                lower_limb_weight=criterion_config.lower_limb_weight,
             )
             source_loss = source_losses["loss"]
-            total_loss = total_loss + criterion_config.source_replay_weight * source_loss
+            total_loss = total_loss + source_loss_weight * source_loss
+            if criterion_config.align_weight > 0.0:
+                if encoder_features is None:
+                    raise RuntimeError("Target encoder features were not computed for alignment")
+                align = compute_alignment_loss(
+                    source_features,
+                    encoder_features,
+                    align_loss=criterion_config.align_loss,
+                )
+                total_loss = total_loss + criterion_config.align_weight * align
 
         losses["target_loss"] = target_loss
         if source_loss is not None:
             losses["source_loss"] = source_loss
+        if align is not None:
+            losses["align_loss"] = align
         losses["loss"] = total_loss
         metrics = compute_metrics(prediction.detach(), target)
         losses["loss"].backward()
@@ -944,13 +1079,28 @@ def _run_source_only(config: TrainConfig, device: torch.device, output_dir: Path
 def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -> None:
     target_envs = config.target_envs
     if not target_envs:
-        raise ValueError("--target-envs required for finetune mode")
+        raise ValueError("--target-envs required for finetune modes")
     if config.distal_replay_factor < 1:
         raise ValueError("--distal-replay-factor must be >= 1")
     if not (0.0 < config.distal_replay_fraction <= 1.0):
         raise ValueError("--distal-replay-fraction must be in (0, 1]")
-    if config.source_replay_weight > 0.0 and not config.source_envs:
-        raise ValueError("--source-envs required when --source-replay-weight > 0")
+    needs_source_loader = (
+        config.source_replay_weight > 0.0
+        or config.mode == "finetune_align"
+        or config.align_weight > 0.0
+    )
+    if needs_source_loader and not config.source_envs and not config.split_manifest:
+        raise ValueError(
+            "--source-envs required for source replay or alignment without a split manifest"
+        )
+    if config.align_layer not in ALIGN_LAYERS:
+        raise ValueError(
+            f"Unsupported align_layer: {config.align_layer}. Valid options: {ALIGN_LAYERS}"
+        )
+    if config.align_weight < 0.0:
+        raise ValueError("--align-weight must be non-negative")
+    if config.align_weight > 0.0 and config.align_loss == "none":
+        raise ValueError("--align-loss must not be none when --align-weight is positive")
     if "wrist_refiner" in config.trainable_groups and not config.wrist_refinement:
         raise ValueError("--wrist-refinement is required when training wrist_refiner parameters")
 
@@ -1009,7 +1159,7 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
         )
 
     source_loader: DataLoader | None = None
-    if config.source_replay_weight > 0.0:
+    if needs_source_loader:
         if manifest is not None:
             source_loader = create_manifest_data_loader(
                 data_dir=config.dataset_root,
@@ -1030,8 +1180,11 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
                 seed=config.seed,
             )
         print(
-            "Source replay: "
-            f"{len(source_loader.dataset)} source frames, weight={config.source_replay_weight:.3f}"
+            "Source supervision/alignment: "
+            f"{len(source_loader.dataset)} source frames, "
+            f"supervision_weight="
+            f"{1.0 if config.mode == 'finetune_align' else config.source_replay_weight:.3f}, "
+            f"align={config.align_loss}, align_weight={config.align_weight:.3f}"
         )
 
     indices_path = output_dir / "few_shot_train_indices.npy"
@@ -1117,6 +1270,11 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
             "distal_replay_fraction": config.distal_replay_fraction,
             "source_replay_weight": config.source_replay_weight,
             "wrist_direction_loss_weight": config.wrist_direction_loss_weight,
+            "joint_loss_preset": config.joint_loss_preset,
+            "lower_limb_weight": config.lower_limb_weight,
+            "align_loss": config.align_loss,
+            "align_layer": config.align_layer,
+            "align_weight": config.align_weight,
             "train_loss": train_metrics["loss"],
             "train_coord_loss": train_metrics["coord_loss"],
             "train_bone_loss": train_metrics["bone_loss"],
@@ -1142,6 +1300,8 @@ def _run_finetune(config: TrainConfig, device: torch.device, output_dir: Path) -
             row["train_target_loss"] = train_metrics["target_loss"]
         if "source_loss" in train_metrics:
             row["train_source_loss"] = train_metrics["source_loss"]
+        if "align_loss" in train_metrics:
+            row["train_align_loss"] = train_metrics["align_loss"]
         append_csv_row(log_path, row)
         append_epoch_metric_csvs(output_dir, epoch, train_metrics, val_metrics)
 
@@ -1177,7 +1337,7 @@ def run_training(config: TrainConfig) -> None:
 
     if config.mode == "source_only":
         _run_source_only(config, device, output_dir)
-    elif config.mode == "finetune":
+    elif config.mode in ("finetune", "finetune_align"):
         _run_finetune(config, device, output_dir)
     else:
         raise ValueError(f"Unknown mode: {config.mode}")
@@ -1185,7 +1345,11 @@ def run_training(config: TrainConfig) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the WiFlow pose model.")
-    parser.add_argument("--mode", required=True, choices=("source_only", "finetune"))
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=("source_only", "finetune", "finetune_align"),
+    )
     parser.add_argument("--dataset-root", required=True, help="Path to the NPY memmap dataset directory.")
     parser.add_argument("--output-dir", default="outputs/train", help="Directory for logs and checkpoints.")
     parser.add_argument("--axial-mode", default="spatial_then_temporal", choices=AXIAL_ENCODER_MODES)
@@ -1302,6 +1466,29 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Enable an identity-initialized local refinement head for custom wrist joints 10 and 12."
         ),
+    )
+    parser.add_argument(
+        "--joint-loss-preset",
+        default="uniform",
+        choices=JOINT_LOSS_PRESETS,
+        help=(
+            "Coordinate-loss weighting preset. lower_limb upweights the custom-schema "
+            "left/right hip, knee, and ankle joints; uniform preserves the baseline."
+        ),
+    )
+    parser.add_argument(
+        "--lower-limb-weight",
+        type=float,
+        default=1.0,
+        help="Joint weight used only by --joint-loss-preset lower_limb.",
+    )
+    parser.add_argument("--align-loss", default="none", choices=ALIGN_LOSSES)
+    parser.add_argument("--align-layer", default="axial", choices=ALIGN_LAYERS)
+    parser.add_argument(
+        "--align-weight",
+        type=float,
+        default=0.0,
+        help="CORAL feature-alignment weight for finetune_align.",
     )
     parser.add_argument("--source-envs", nargs="*", default=None, help="Source environment names")
     parser.add_argument("--target-envs", nargs="*", default=None, help="Target environment names")

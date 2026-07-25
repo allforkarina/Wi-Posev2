@@ -86,6 +86,7 @@ JOINT_GROUPS: Final[dict[str, tuple[int, ...]]] = {
     "right_arm": (9, 13, 10),
     "left_leg": (16, 5, 1, 2),
     "right_leg": (15, 14, 17),
+    "lower_limb": (16, 5, 2, 15, 14, 17),
     "distal": (2, 4, 10, 12, 17),
 }
 
