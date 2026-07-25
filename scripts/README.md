@@ -2,6 +2,9 @@
 
 ## Data preparation
 
+- `scripts/data/audit_raw_ground_truth.py`: audit raw 17-joint GT,
+  CSI/GT frame alignment, and the current 17-to-18 mapping without modifying
+  the dataset. Run this before rebuilding delivery memmaps.
 - `scripts/data/build_memmap.py`: build CSI and pose memmap files from raw
   MM-Fi data; requires `--src` and `--dst`.
 - `scripts/data/build_groundtruth.py`: merge pre-annotated GT arrays.
